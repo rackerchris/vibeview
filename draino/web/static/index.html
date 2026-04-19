@@ -31,6 +31,7 @@
       <input id="global-search-input" class="top-search" type="text" placeholder="🔍  Search nodes, instances…" autocomplete="off" aria-label="Global search">
       <div id="global-search-dropdown" class="global-search-dropdown" style="display:none"></div>
     </div>
+    <button class="btn" id="assistant-toggle-btn" onclick="toggleAssistantPanel()">Assistant</button>
     <label class="polling-control" for="polling-select" title="Background refresh cadence for node inventory and VM list">
       <span>Polling</span>
       <select id="polling-select" onchange="setPollingInterval(this.value)">
@@ -53,6 +54,8 @@
     </div>
   </div>
 </div>
+
+<div id="assistant-panel" class="assistant-panel" style="display:none"></div>
 
 <!-- ═══ BREADCRUMB BAR ═══ -->
 <div id="breadcrumb-bar">
@@ -592,6 +595,7 @@
     <script src="/static/app_resources.js"></script>
 <script src="/static/app_projects.js"></script>
 <script src="/static/app_search.js"></script>
+<script src="/static/app_assistant.js"></script>
 <script src="/static/app_reports_openstack.js"></script>
 <script src="/static/app_reports_k8s.js"></script>
 <script src="/static/app_reports.js"></script>

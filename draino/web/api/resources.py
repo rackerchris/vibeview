@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 from collections.abc import Callable
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from ...operations import k8s_ops, openstack_ops
+from ..assistant_service import answer_assistant_query, assistant_provider_status, stream_assistant_query, validate_assistant_provider
 from .api_issues import build_api_issue
 from ..resource_helpers import (
     get_floating_ips,
@@ -37,7 +40,9 @@ from ..resource_helpers import (
 )
 
 router = APIRouter()
+_LOGGER = logging.getLogger("draino.web")
 _RESOURCE_DETAIL_TIMEOUT_SECONDS = float(os.getenv("DRAINO_RESOURCE_DETAIL_TIMEOUT_SECONDS", "10"))
+_ASSISTANT_QUERY_TIMEOUT_SECONDS = float(os.getenv("DRAINO_ASSISTANT_QUERY_TIMEOUT_SECONDS", "20"))
 
 _get_session_record_getter: Callable[[], Callable[[Request], object]] | None = None
 
@@ -59,6 +64,11 @@ async def _run_with_timeout(func, *args):
         loop.run_in_executor(None, func, *args),
         timeout=_RESOURCE_DETAIL_TIMEOUT_SECONDS,
     )
+
+
+async def _run_assistant_with_timeout(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, func, *args)
 
 
 @router.get("/api/networks")
@@ -116,6 +126,135 @@ async def api_search(request: Request):
         }
     except Exception as exc:
         return {"results": [], "error": str(exc), "api_issue": build_api_issue("OpenStack", f"GET aggregated search for query {query}", exc)}
+
+
+@router.post("/api/assistant/query")
+async def api_assistant_query(request: Request):
+    session = _require_session_record()(request)
+    payload = await request.json()
+    query = str(payload.get("query") or "").strip()
+    selected_project_id = str(payload.get("selected_project_id") or "").strip()
+    selected_project_name = str(payload.get("selected_project_name") or "").strip()
+    active_view = str(payload.get("active_view") or "").strip()
+    resolved_kind = str(payload.get("resolved_kind") or "").strip()
+    resolved_id = str(payload.get("resolved_id") or "").strip()
+    resolved_label = str(payload.get("resolved_label") or "").strip()
+    if not query:
+        return {"result": None, "error": "Query is required.", "api_issue": None}
+    try:
+        data = await _run_assistant_with_timeout(
+            answer_assistant_query,
+            query,
+            session.server.openstack_auth,
+            session.server.k8s_auth,
+            selected_project_id,
+            selected_project_name,
+            active_view,
+            resolved_kind,
+            resolved_id,
+            resolved_label,
+        )
+        return {"result": data, "error": None, "api_issue": None}
+    except TimeoutError:
+        return {
+            "result": None,
+            "error": f"Timed out after {_ASSISTANT_QUERY_TIMEOUT_SECONDS:.0f}s while answering assistant query",
+            "api_issue": None,
+        }
+    except Exception as exc:
+        return {"result": None, "error": str(exc), "api_issue": build_api_issue("Assistant", "POST /api/assistant/query", exc)}
+
+
+@router.post("/api/assistant/query/stream")
+async def api_assistant_query_stream(request: Request):
+    session = _require_session_record()(request)
+    payload = await request.json()
+    query = str(payload.get("query") or "").strip()
+    selected_project_id = str(payload.get("selected_project_id") or "").strip()
+    selected_project_name = str(payload.get("selected_project_name") or "").strip()
+    active_view = str(payload.get("active_view") or "").strip()
+    resolved_kind = str(payload.get("resolved_kind") or "").strip()
+    resolved_id = str(payload.get("resolved_id") or "").strip()
+    resolved_label = str(payload.get("resolved_label") or "").strip()
+    if not query:
+        return JSONResponse(status_code=400, content={"error": "Query is required.", "api_issue": None})
+    _LOGGER.info("assistant stream start query=%r", query[:120])
+
+    async def event_stream():
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+        stream_started = loop.time()
+        first_event_logged = False
+
+        def push(event: dict):
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+
+        def worker():
+            try:
+                for event in stream_assistant_query(
+                    query,
+                    session.server.openstack_auth,
+                    session.server.k8s_auth,
+                    selected_project_id,
+                    selected_project_name,
+                    active_view,
+                    resolved_kind,
+                    resolved_id,
+                    resolved_label,
+                ):
+                    push(event)
+            except Exception as exc:
+                push({"type": "error", "error": str(exc), "api_issue": build_api_issue("Assistant", "POST /api/assistant/query/stream", exc)})
+            finally:
+                push({"type": "done"})
+
+        task = loop.run_in_executor(None, worker)
+        try:
+            while True:
+                event = await queue.get()
+                nonlocal_first = False
+                if not first_event_logged and event.get("type") in {"meta", "delta", "final", "error"}:
+                    first_event_logged = True
+                    nonlocal_first = True
+                if nonlocal_first:
+                    _LOGGER.info(
+                        "assistant stream first event query=%r type=%s elapsed_ms=%.1f",
+                        query[:120],
+                        event.get("type"),
+                        (loop.time() - stream_started) * 1000,
+                    )
+                yield (json.dumps(event) + "\n").encode("utf-8")
+                if event.get("type") in {"done", "error"}:
+                    break
+        finally:
+            await task
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+@router.get("/api/assistant/status")
+async def api_assistant_status(request: Request):
+    _require_session_record()(request)
+    try:
+        return {"status": assistant_provider_status(), "error": None, "api_issue": None}
+    except Exception as exc:
+        return {"status": None, "error": str(exc), "api_issue": build_api_issue("Assistant", "GET /api/assistant/status", exc)}
+
+
+@router.post("/api/assistant/validate")
+async def api_assistant_validate(request: Request):
+    _require_session_record()(request)
+    try:
+        data = await _run_with_timeout(validate_assistant_provider)
+        return {"validation": data, "error": None if data.get("ok") else data.get("error") or None, "api_issue": None}
+    except TimeoutError:
+        return {
+            "validation": None,
+            "error": f"Timed out after {_RESOURCE_DETAIL_TIMEOUT_SECONDS:.0f}s while validating assistant provider",
+            "api_issue": None,
+        }
+    except Exception as exc:
+        return {"validation": None, "error": str(exc), "api_issue": build_api_issue("Assistant", "POST /api/assistant/validate", exc)}
 
 
 @router.get("/api/projects/{project_id}/inventory")

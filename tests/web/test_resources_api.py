@@ -6,6 +6,10 @@ from fastapi.testclient import TestClient
 
 from draino.web import server as web_server
 from draino.web.api import resources as resource_api
+from draino.web import assistant_evidence
+from draino.web import assistant_cluster_answers
+from draino.web import assistant_service
+from draino.web import assistant_resource_answers
 from draino.web import resource_helpers
 
 
@@ -183,6 +187,1466 @@ def test_load_balancers_endpoint_returns_items(monkeypatch):
     assert body["error"] is None
     assert body["load_balancers"][0]["floating_ip"] == "198.51.100.25"
     assert body["load_balancers"][0]["amphora_count"] == 2
+
+
+def test_assistant_query_endpoint_returns_answer(monkeypatch):
+    monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
+    monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
+
+    class FakeConn:
+        def authorize(self):
+            return None
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
+    monkeypatch.setattr(
+        resource_api,
+        "answer_assistant_query",
+        lambda query, auth=None, k8s_auth=None, selected_project_id="", selected_project_name="", active_view="", resolved_kind="", resolved_id="", resolved_label="": {
+            "intent": "quota_usage",
+            "answer": "In project admin, you are using 13 floating IPs out of 50.",
+            "confidence": 0.93,
+            "needs_clarification": False,
+            "actions": [{"type": "open_project_tab", "project_id": selected_project_id, "tab": "quota"}],
+        },
+    )
+
+    payload = {
+        "kubernetes": {"server": "https://cluster.example:6443", "token": "token-1", "skip_tls_verify": False},
+        "openstack": {
+            "auth_url": "https://keystone.example/v3",
+            "username": "ops-user",
+            "password": "secret",
+            "project_name": "admin",
+            "user_domain_name": "Default",
+            "project_domain_name": "Default",
+        },
+    }
+
+    with TestClient(web_server.fastapi_app) as client:
+        login = client.post("/api/session", json=payload)
+        assert login.status_code == 200
+        resp = client.post("/api/assistant/query", json={
+            "query": "how many floating ips am I using?",
+            "selected_project_id": "proj-1",
+            "selected_project_name": "admin",
+            "active_view": "projects",
+        })
+
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["result"]["intent"] == "quota_usage"
+    assert "13 floating IPs" in body["result"]["answer"]
+
+
+def test_assistant_query_endpoint_forwards_resolved_choice(monkeypatch):
+    monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
+    monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
+
+    class FakeConn:
+        def authorize(self):
+            return None
+
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
+
+    def fake_answer(query, auth=None, k8s_auth=None, selected_project_id="", selected_project_name="", active_view="", resolved_kind="", resolved_id="", resolved_label=""):
+        captured["resolved_kind"] = resolved_kind
+        captured["resolved_id"] = resolved_id
+        captured["resolved_label"] = resolved_label
+        return {
+            "intent": "instance_status",
+            "answer": "james-vm is ACTIVE on host cmp-1.",
+            "confidence": 0.97,
+            "needs_clarification": False,
+            "actions": [],
+        }
+
+    monkeypatch.setattr(resource_api, "answer_assistant_query", fake_answer)
+
+    payload = {
+        "kubernetes": {"server": "https://cluster.example:6443", "token": "token-1", "skip_tls_verify": False},
+        "openstack": {
+            "auth_url": "https://keystone.example/v3",
+            "username": "ops-user",
+            "password": "secret",
+            "project_name": "admin",
+            "user_domain_name": "Default",
+            "project_domain_name": "Default",
+        },
+    }
+
+    with TestClient(web_server.fastapi_app) as client:
+        login = client.post("/api/session", json=payload)
+        assert login.status_code == 200
+        resp = client.post("/api/assistant/query", json={
+            "query": "what is the status of vm james-vm?",
+            "selected_project_id": "proj-1",
+            "selected_project_name": "admin",
+            "active_view": "projects",
+            "resolved_kind": "instance",
+            "resolved_id": "vm-1",
+            "resolved_label": "james-vm",
+        })
+
+    assert resp.status_code == 200
+    assert captured == {
+        "resolved_kind": "instance",
+        "resolved_id": "vm-1",
+        "resolved_label": "james-vm",
+    }
+
+
+def test_assistant_query_stream_endpoint_returns_events(monkeypatch):
+    monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
+    monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
+
+    class FakeConn:
+        def authorize(self):
+            return None
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
+    monkeypatch.setattr(
+        resource_api,
+        "stream_assistant_query",
+        lambda query, auth=None, k8s_auth=None, selected_project_id="", selected_project_name="", active_view="", resolved_kind="", resolved_id="", resolved_label="": iter([
+            {"type": "meta", "meta": {"intent": "platform_knowledge", "parser_source": "task-router", "answer_source": "xerotier"}},
+            {"type": "delta", "text": "A router connects networks. "},
+            {"type": "delta", "text": "It can also provide external gateway access."},
+            {"type": "final", "result": {"intent": "platform_knowledge", "answer": "A router connects networks. It can also provide external gateway access.", "confidence": 0.45}},
+        ]),
+    )
+
+    payload = {
+        "kubernetes": {"server": "https://cluster.example:6443", "token": "token-1", "skip_tls_verify": False},
+        "openstack": {
+            "auth_url": "https://keystone.example/v3",
+            "username": "ops-user",
+            "password": "secret",
+            "project_name": "admin",
+            "user_domain_name": "Default",
+            "project_domain_name": "Default",
+        },
+    }
+
+    with TestClient(web_server.fastapi_app) as client:
+        login = client.post("/api/session", json=payload)
+        assert login.status_code == 200
+        with client.stream("POST", "/api/assistant/query/stream", json={"query": "what is a router?"}) as resp:
+            assert resp.status_code == 200
+            lines = [line for line in resp.iter_lines() if line]
+
+    assert any('"type": "meta"' in line for line in lines)
+    assert any('"type": "delta"' in line for line in lines)
+    assert any('"type": "final"' in line for line in lines)
+
+
+def test_assistant_status_endpoint_returns_status(monkeypatch):
+    monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
+    monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
+
+    class FakeConn:
+        def authorize(self):
+            return None
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
+    monkeypatch.setattr(
+        resource_api,
+        "assistant_provider_status",
+        lambda: {
+            "configured": True,
+            "base_url": "https://xerotier.example/v1",
+            "base_host": "xerotier.example",
+            "model": "ops-model",
+            "timeout_seconds": 10.0,
+        },
+    )
+
+    payload = {
+        "kubernetes": {"server": "https://cluster.example:6443", "token": "token-1", "skip_tls_verify": False},
+        "openstack": {
+            "auth_url": "https://keystone.example/v3",
+            "username": "ops-user",
+            "password": "secret",
+            "project_name": "admin",
+            "user_domain_name": "Default",
+            "project_domain_name": "Default",
+        },
+    }
+
+    with TestClient(web_server.fastapi_app) as client:
+        login = client.post("/api/session", json=payload)
+        assert login.status_code == 200
+        resp = client.get("/api/assistant/status")
+
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["status"]["configured"] is True
+    assert body["status"]["base_host"] == "xerotier.example"
+
+
+def test_assistant_validate_endpoint_returns_validation(monkeypatch):
+    monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
+    monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
+
+    class FakeConn:
+        def authorize(self):
+            return None
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
+    monkeypatch.setattr(
+        resource_api,
+        "validate_assistant_provider",
+        lambda: {
+            "configured": True,
+            "base_url": "https://xerotier.example/v1",
+            "base_host": "xerotier.example",
+            "model": "ops-model",
+            "timeout_seconds": 10.0,
+            "ok": True,
+            "error": "",
+            "latency_ms": 142.5,
+            "response_text": "OK",
+        },
+    )
+
+    payload = {
+        "kubernetes": {"server": "https://cluster.example:6443", "token": "token-1", "skip_tls_verify": False},
+        "openstack": {
+            "auth_url": "https://keystone.example/v3",
+            "username": "ops-user",
+            "password": "secret",
+            "project_name": "admin",
+            "user_domain_name": "Default",
+            "project_domain_name": "Default",
+        },
+    }
+
+    with TestClient(web_server.fastapi_app) as client:
+        login = client.post("/api/session", json=payload)
+        assert login.status_code == 200
+        resp = client.post("/api/assistant/validate", json={})
+
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["validation"]["ok"] is True
+    assert body["validation"]["response_text"] == "OK"
+
+
+def test_assistant_service_answers_instance_ips(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "instance_ips",
+            "resource_kind": "instance",
+            "resource_name": "james-vm",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_instance",
+        lambda query, auth, k8s_auth=None, project_id="": (
+            {"id": "vm-1", "label": "james-vm", "project_id": "proj-1", "compute_host": "cmp-1"},
+            [{"id": "vm-1", "label": "james-vm", "project_id": "proj-1", "compute_host": "cmp-1"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_project_instances",
+        lambda auth=None, project_id="": [{
+            "id": "vm-1",
+            "name": "james-vm",
+            "project_id": "proj-1",
+            "project_name": "admin",
+            "compute_host": "cmp-1",
+            "status": "ACTIVE",
+            "fixed_ips": ["10.0.0.5"],
+            "floating_ips": ["198.51.100.10"],
+            "networks": [{"name": "private"}],
+        }],
+    )
+
+    result = assistant_service.answer_assistant_query("what ips does vm james-vm have?", auth=None)
+
+    assert result["intent"] == "instance_ips"
+    assert "10.0.0.5" in result["answer"]
+    assert "198.51.100.10" in result["answer"]
+
+
+def test_assistant_service_answers_quota_limit(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "quota_limit",
+            "resource_kind": "quota",
+            "resource_name": "floating_ips",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_project_quota_summary",
+        lambda project_id, auth=None: {
+            "compute": {},
+            "network": {"floatingip": {"used": 13, "limit": 50}},
+            "block_storage": {},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what is my floating ip limit?", auth=None)
+
+    assert result["intent"] == "quota_limit"
+    assert "50" in result["answer"]
+
+
+def test_assistant_service_skips_provider_for_simple_fallback_query(monkeypatch):
+    monkeypatch.setattr(assistant_service, "_ASSISTANT_BASE_URL", "https://xerotier.example/v1")
+    monkeypatch.setattr(assistant_service, "_ASSISTANT_API_KEY", "token")
+    monkeypatch.setattr(assistant_service, "_ASSISTANT_MODEL", "ops-model")
+
+    def fail_openai_import():
+        raise AssertionError("provider path should not be used for simple fallback queries")
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_project_quota_summary",
+        lambda project_id, auth=None: {
+            "compute": {},
+            "network": {"floatingip": {"used": 13, "limit": 50}},
+            "block_storage": {},
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_backfill_compute_quota_usage",
+        lambda project_id, auth, quotas: quotas,
+    )
+
+    import builtins
+    original_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "openai":
+            fail_openai_import()
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    result = assistant_service.answer_assistant_query("how many floating ips do i have?", auth=None)
+
+    assert result["intent"] == "quota_usage"
+    assert result["parser_source"] == "fallback"
+
+
+def test_assistant_service_answers_security_group_lockdown(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "security_group_lockdown_suggestions",
+            "resource_kind": "security_group",
+            "resource_name": "web-tier",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_security_group",
+        lambda query, auth, k8s_auth=None, project_id="": (
+            {"id": "sg-1", "label": "web-tier", "project_id": "proj-1"},
+            [{"id": "sg-1", "label": "web-tier", "project_id": "proj-1"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_security_group_detail",
+        lambda group_id, auth=None: {
+            "id": "sg-1",
+            "name": "web-tier",
+            "project_id": "proj-1",
+            "project_name": "admin",
+            "rule_count": 3,
+            "attachment_port_count": 1,
+            "audit": {
+                "severity": "high",
+                "findings": [{"summary": "tcp:22 0.0.0.0/0"}],
+            },
+            "rules": [{
+                "audit": {
+                    "category": "public-admin-port",
+                },
+            }],
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("audit security group web-tier and suggest how to lock it down", auth=None)
+
+    assert result["intent"] == "security_group_lockdown_suggestions"
+    assert "Recommended next steps" in result["answer"]
+    assert result["recommendations"]
+
+
+def test_assistant_service_returns_instance_choices_when_ambiguous(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "instance_status",
+            "resource_kind": "instance",
+            "resource_name": "james-vm",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_instance",
+        lambda query, auth, k8s_auth=None, project_id="": (
+            None,
+            [
+                {"id": "vm-1", "label": "james-vm", "project_id": "proj-1", "project_name": "admin", "compute_host": "cmp-1"},
+                {"id": "vm-2", "label": "james-vm", "project_id": "proj-2", "project_name": "prod", "compute_host": "cmp-2"},
+            ],
+        ),
+    )
+
+    result = assistant_service.answer_assistant_query("what is the status of vm james-vm?", auth=None)
+
+    assert result["needs_clarification"] is True
+    assert result["clarifying_question"] == "Which instance did you mean?"
+    assert len(result["choices"]) == 2
+    assert result["choices"][0]["kind"] == "instance"
+    assert "cmp-1" in result["choices"][0]["subtext"]
+
+
+def test_assistant_service_returns_security_group_choices_when_ambiguous(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "security_group_audit",
+            "resource_kind": "security_group",
+            "resource_name": "web-tier",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_security_group",
+        lambda query, auth, k8s_auth=None, project_id="": (
+            None,
+            [
+                {"id": "sg-1", "label": "web-tier", "project_id": "proj-1", "project_name": "admin"},
+                {"id": "sg-2", "label": "web-tier", "project_id": "proj-2", "project_name": "prod"},
+            ],
+        ),
+    )
+
+    result = assistant_service.answer_assistant_query("audit security group web-tier", auth=None)
+
+    assert result["needs_clarification"] is True
+    assert result["clarifying_question"] == "Which security group did you mean?"
+    assert len(result["choices"]) == 2
+    assert result["choices"][0]["kind"] == "securitygroup"
+
+
+def test_assistant_service_resolves_project_hint_for_quota(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "quota_usage",
+            "resource_kind": "quota",
+            "resource_name": "cores",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_project",
+        lambda query, auth, k8s_auth=None: (
+            {"id": "proj-2", "label": "prod"},
+            [{"id": "proj-2", "label": "prod"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_project_quota_summary",
+        lambda project_id, auth=None: {
+            "compute": {"cores": {"used": 24, "limit": 64}},
+            "network": {},
+            "block_storage": {},
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_backfill_compute_quota_usage",
+        lambda project_id, auth, quotas: quotas,
+    )
+
+    result = assistant_service.answer_assistant_query("how many cores is project prod using?", auth=None)
+
+    assert result["intent"] == "quota_usage"
+    assert "project prod" in result["answer"].lower()
+    assert result["scope"]["project_id"] == "proj-2"
+    assert result["actions"][0]["label"] == "Open Quota"
+
+
+def test_assistant_service_returns_project_choices_when_ambiguous(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "project_network_summary",
+            "resource_kind": "project",
+            "resource_name": "",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_project",
+        lambda query, auth, k8s_auth=None: (
+            None,
+            [
+                {"id": "proj-1", "label": "prod-east"},
+                {"id": "proj-2", "label": "prod-west"},
+            ],
+        ),
+    )
+
+    result = assistant_service.answer_assistant_query("summarize networking for project prod", auth=None)
+
+    assert result["needs_clarification"] is True
+    assert result["clarifying_question"] == "Which project did you mean?"
+    assert len(result["choices"]) == 2
+    assert result["choices"][0]["kind"] == "project"
+
+
+def test_assistant_service_opens_network_resource(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "open_resource",
+            "resource_kind": "network",
+            "resource_name": "tenant-net",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_resource",
+        lambda kind, query, auth, k8s_auth=None, project_id="": (
+            {"id": "net-1", "label": "tenant-net", "project_id": "proj-1", "project_name": "admin"},
+            [{"id": "net-1", "label": "tenant-net", "project_id": "proj-1", "project_name": "admin"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_network_detail",
+        lambda network_id, auth=None: {
+            "id": network_id,
+            "name": "tenant-net",
+            "status": "ACTIVE",
+            "project_name": "admin",
+            "subnets": [{"id": "subnet-1"}],
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("open network tenant-net", auth=None)
+
+    assert result["intent"] == "open_resource"
+    assert "tenant-net" in result["answer"]
+    assert result["actions"][0]["type"] == "open_network"
+
+
+def test_assistant_service_returns_port_choices_when_ambiguous(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "open_resource",
+            "resource_kind": "port",
+            "resource_name": "api-port",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_resource",
+        lambda kind, query, auth, k8s_auth=None, project_id="": (
+            None,
+            [
+                {"id": "port-1", "label": "api-port", "project_id": "proj-1", "project_name": "admin"},
+                {"id": "port-2", "label": "api-port", "project_id": "proj-1", "project_name": "admin"},
+            ],
+        ),
+    )
+
+    result = assistant_service.answer_assistant_query("open port api-port", auth=None)
+
+    assert result["needs_clarification"] is True
+    assert result["clarifying_question"] == "Which port did you mean?"
+    assert len(result["choices"]) == 2
+    assert result["choices"][0]["kind"] == "port"
+
+
+def test_assistant_service_opens_floating_ip_family(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "open_resource",
+            "resource_kind": "floatingip",
+            "resource_name": "198.51.100.10",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_resolve_resource",
+        lambda kind, query, auth, k8s_auth=None, project_id="": (
+            {"id": "fip-1", "label": "198.51.100.10", "project_id": "proj-1", "project_name": "admin"},
+            [{"id": "fip-1", "label": "198.51.100.10", "project_id": "proj-1", "project_name": "admin"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_floating_ips",
+        lambda auth=None, project_id="": [{
+            "id": "fip-1",
+            "floating_ip_address": "198.51.100.10",
+            "status": "DOWN",
+            "instance_name": "",
+            "fixed_ip_address": "",
+            "project_id": "proj-1",
+        }],
+    )
+
+    result = assistant_service.answer_assistant_query("open floating ip 198.51.100.10", auth=None)
+
+    assert result["intent"] == "open_resource"
+    assert result["actions"][0]["type"] == "open_project_network_family"
+    assert result["actions"][0]["family"] == "floatingips"
+
+
+def test_assistant_service_answers_port_attachment_status(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "port_attachment_status",
+            "resource_kind": "port",
+            "resource_name": "api-port",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "resolve_assistant_resource",
+        lambda kind, query, auth, project_id="": (
+            {"id": "port-1", "label": "api-port", "project_id": "proj-1", "project_name": "admin", "compute_host": "cmp-1"},
+            [{"id": "port-1", "label": "api-port", "project_id": "proj-1", "project_name": "admin", "compute_host": "cmp-1"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_port_detail",
+        lambda port_id, auth=None: {
+            "id": port_id,
+            "name": "api-port",
+            "project_id": "proj-1",
+            "network_name": "tenant-net",
+            "attached_kind": "instance",
+            "attached_id": "vm-1",
+            "attached_name": "api-01",
+            "compute_host": "cmp-1",
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("is port api-port attached to anything?", auth=None)
+
+    assert result["intent"] == "port_attachment_status"
+    assert "attached to instance api-01" in result["answer"]
+    assert any(action["type"] == "open_port" for action in result["actions"])
+    assert any(action["type"] == "open_instance" for action in result["actions"])
+
+
+def test_assistant_service_answers_router_external_status(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "router_external_status",
+            "resource_kind": "router",
+            "resource_name": "edge-router",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "resolve_assistant_resource",
+        lambda kind, query, auth, project_id="": (
+            {"id": "router-1", "label": "edge-router", "project_id": "proj-1"},
+            [{"id": "router-1", "label": "edge-router", "project_id": "proj-1"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_router_detail",
+        lambda router_id, auth=None: {
+            "id": router_id,
+            "name": "edge-router",
+            "project_id": "proj-1",
+            "external_gateway": {"network_id": "net-ext", "network_name": "external-net", "enable_snat": True},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("is router edge-router external?", auth=None)
+
+    assert result["intent"] == "router_external_status"
+    assert "external via external-net" in result["answer"]
+    assert any(action["type"] == "open_router" for action in result["actions"])
+
+
+def test_assistant_service_answers_volume_attachment_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "volume_attachment_summary",
+            "resource_kind": "volume",
+            "resource_name": "db-volume",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "resolve_assistant_resource",
+        lambda kind, query, auth, project_id="": (
+            {"id": "vol-1", "label": "db-volume", "project_id": "proj-1"},
+            [{"id": "vol-1", "label": "db-volume", "project_id": "proj-1"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_volume_detail",
+        lambda volume_id, auth=None: {
+            "id": volume_id,
+            "name": "db-volume",
+            "project_id": "proj-1",
+            "attachments": [{"server_id": "vm-1", "server_name": "db-01"}],
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what is volume db-volume attached to?", auth=None)
+
+    assert result["intent"] == "volume_attachment_summary"
+    assert "attached to db-01" in result["answer"]
+    assert result["actions"][0]["type"] == "open_volume"
+
+
+def test_assistant_service_answers_floating_ip_instance_status(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "floating_ip_instance_status",
+            "resource_kind": "floatingip",
+            "resource_name": "198.51.100.10",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "resolve_assistant_resource",
+        lambda kind, query, auth, project_id="": (
+            {"id": "fip-1", "label": "198.51.100.10", "project_id": "proj-1", "project_name": "admin"},
+            [{"id": "fip-1", "label": "198.51.100.10", "project_id": "proj-1", "project_name": "admin"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_floating_ips",
+        lambda auth=None, project_id="": [{
+            "id": "fip-1",
+            "floating_ip_address": "198.51.100.10",
+            "project_id": "proj-1",
+            "project_name": "admin",
+            "instance_id": "vm-1",
+            "instance_name": "api-01",
+            "compute_host": "cmp-1",
+        }],
+    )
+
+    result = assistant_service.answer_assistant_query("does floating ip 198.51.100.10 belong to a vm?", auth=None)
+
+    assert result["intent"] == "floating_ip_instance_status"
+    assert "belongs to VM api-01" in result["answer"]
+    assert any(action["type"] == "open_instance" for action in result["actions"])
+
+
+def test_assistant_service_answers_port_public_exposure(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "port_public_exposure",
+            "resource_kind": "port",
+            "resource_name": "api-port",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "resolve_assistant_resource",
+        lambda kind, query, auth, project_id="": (
+            {"id": "port-1", "label": "api-port", "project_id": "proj-1"},
+            [{"id": "port-1", "label": "api-port", "project_id": "proj-1"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_port_detail",
+        lambda port_id, auth=None: {
+            "id": port_id,
+            "name": "api-port",
+            "project_id": "proj-1",
+            "floating_ips": [{"address": "198.51.100.10"}],
+            "security_groups": [{"id": "sg-1", "name": "web-open"}],
+        },
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_security_group_detail",
+        lambda group_id, auth=None: {"audit": {"severity": "high"}},
+    )
+
+    result = assistant_service.answer_assistant_query("is port api-port exposed publicly?", auth=None)
+
+    assert result["intent"] == "port_public_exposure"
+    assert "publicly exposed" in result["answer"]
+    assert any(action["type"] == "open_networking_security_group" for action in result["actions"])
+
+
+def test_assistant_service_answers_router_connectivity_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "router_connectivity_summary",
+            "resource_kind": "router",
+            "resource_name": "edge-router",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "resolve_assistant_resource",
+        lambda kind, query, auth, project_id="": (
+            {"id": "router-1", "label": "edge-router", "project_id": "proj-1"},
+            [{"id": "router-1", "label": "edge-router", "project_id": "proj-1"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_router_detail",
+        lambda router_id, auth=None: {
+            "id": router_id,
+            "name": "edge-router",
+            "project_id": "proj-1",
+            "joins": {"attached_network_count": 10, "routed_instance_count": 22, "routed_load_balancer_count": 6},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("is router edge-router highly connected?", auth=None)
+
+    assert result["intent"] == "router_connectivity_summary"
+    assert "fairly central" in result["answer"]
+
+
+def test_assistant_service_answers_volume_posture(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "volume_posture",
+            "resource_kind": "volume",
+            "resource_name": "db-volume",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "resolve_assistant_resource",
+        lambda kind, query, auth, project_id="": (
+            {"id": "vol-1", "label": "db-volume", "project_id": "proj-1"},
+            [{"id": "vol-1", "label": "db-volume", "project_id": "proj-1"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_volume_detail",
+        lambda volume_id, auth=None: {
+            "id": volume_id,
+            "name": "db-volume",
+            "project_id": "proj-1",
+            "bootable": False,
+            "encrypted": True,
+            "multiattach": False,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("is volume db-volume encrypted?", auth=None)
+
+    assert result["intent"] == "volume_posture"
+    assert "not bootable, encrypted, and not multiattach" in result["answer"]
+
+
+def test_assistant_service_answers_floating_ip_idle_status(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "floating_ip_idle_status",
+            "resource_kind": "floatingip",
+            "resource_name": "198.51.100.10",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "resolve_assistant_resource",
+        lambda kind, query, auth, project_id="": (
+            {"id": "fip-1", "label": "198.51.100.10", "project_id": "proj-1", "project_name": "admin"},
+            [{"id": "fip-1", "label": "198.51.100.10", "project_id": "proj-1", "project_name": "admin"}],
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_floating_ips",
+        lambda auth=None, project_id="": [{
+            "id": "fip-1",
+            "floating_ip_address": "198.51.100.10",
+            "project_id": "proj-1",
+            "project_name": "admin",
+            "instance_id": "",
+            "port_id": "",
+            "fixed_ip_address": "",
+        }],
+    )
+
+    result = assistant_service.answer_assistant_query("is floating ip 198.51.100.10 idle?", auth=None)
+
+    assert result["intent"] == "floating_ip_idle_status"
+    assert "appears idle" in result["answer"]
+
+
+def test_assistant_service_looks_up_floating_ip_by_fixed_ip(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_resource_answers,
+        "get_floating_ips",
+        lambda auth=None, project_id="": [{
+            "id": "fip-1",
+            "floating_ip_address": "198.51.100.10",
+            "fixed_ip_address": "10.30.1.188",
+            "project_id": "proj-1",
+            "project_name": "admin",
+            "instance_id": "vm-1",
+            "instance_name": "api-01",
+            "compute_host": "cmp-1",
+        }],
+    )
+
+    result = assistant_service.answer_assistant_query("whats the floating ip for 10.30.1.188", auth=None)
+
+    assert result["intent"] == "floating_ip_lookup_by_fixed_ip"
+    assert "198.51.100.10" in result["answer"]
+    assert result["parser_source"] == "fallback"
+
+
+def test_assistant_service_answers_etcd_health_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for etcd cluster questions")),
+    )
+    monkeypatch.setattr(
+        assistant_cluster_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "node-1", "hostname": "hv-1"},
+            {"name": "node-2", "hostname": "hv-2"},
+            {"name": "node-3", "hostname": "hv-3"},
+        ],
+    )
+    monkeypatch.setattr(assistant_cluster_answers.k8s_ops, "get_etcd_node_names", lambda auth=None: {"node-1", "node-2", "node-3"})
+    monkeypatch.setattr(
+        assistant_cluster_answers.k8s_ops,
+        "get_etcd_service_status",
+        lambda node_name, hostname=None: {"active": node_name != "node-3", "error": None},
+    )
+
+    result = assistant_service.answer_assistant_query("how many etcd nodes are alive?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "etcd_health_summary"
+    assert "3 etcd nodes" in result["answer"]
+    assert "2 are currently alive" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_node_ready_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for cluster node questions")),
+    )
+    monkeypatch.setattr(
+        assistant_cluster_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "node-1", "ready": True, "cordoned": False},
+            {"name": "node-2", "ready": True, "cordoned": True},
+            {"name": "node-3", "ready": False, "cordoned": False},
+        ],
+    )
+
+    result = assistant_service.answer_assistant_query("how many kubernetes nodes are ready?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "node_ready_summary"
+    assert "2 of 3 Kubernetes nodes are Ready" in result["answer"]
+    assert "1 are currently cordoned" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_apiserver_health_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for control-plane questions")),
+    )
+    monkeypatch.setattr(
+        assistant_cluster_answers.k8s_ops,
+        "list_k8s_pods",
+        lambda namespace=None, auth=None: [
+            {"name": "kube-apiserver-cp-1", "phase": "Running", "ready": "1/1"},
+            {"name": "kube-apiserver-cp-2", "phase": "Running", "ready": "1/1"},
+            {"name": "kube-apiserver-cp-3", "phase": "Pending", "ready": "0/1"},
+        ],
+    )
+
+    result = assistant_service.answer_assistant_query("how many api servers are healthy?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "control_plane_component_summary"
+    assert "2 of 3 API server pods are healthy" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_fallback_parser_leaves_networking_diagnosis_question_unknown():
+    parsed = assistant_service._parse_query_fallback("What should I look at first if networking feels unhealthy for this project?")
+
+    assert parsed["intent"] == "unknown"
+    assert parsed["needs_clarification"] is True
+
+
+def test_fallback_parser_leaves_networking_risk_summary_question_unknown():
+    parsed = assistant_service._parse_query_fallback("Summarize the biggest networking risks in this project")
+
+    assert parsed["intent"] == "unknown"
+    assert parsed["needs_clarification"] is True
+
+
+def test_assistant_service_uses_grounded_network_diagnosis(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "build_project_network_diagnosis_evidence",
+        lambda project_id, project_name, auth=None: {
+            "scope": {"project_id": project_id, "project_name": project_name},
+            "summary": {"network_count": 7, "router_count": 1, "port_count": 30, "floating_ip_count": 13},
+            "signals": {"high_risk_security_groups": 2},
+            "findings": ["2 security groups have high-risk audit findings."],
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "synthesize_network_diagnosis",
+        lambda query, evidence, provider: {
+            "answer": "Start with the high-risk security groups and internet-facing ports.",
+            "findings": ["2 security groups have high-risk audit findings."],
+            "recommendations": ["Review those groups first."],
+            "confidence": 0.83,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "What should I look at first if networking feels unhealthy for this project?",
+        auth=None,
+    )
+
+    assert result["intent"] == "network_diagnosis"
+    assert result["mode"] == "grounded_diagnosis"
+    assert result["provenance"] == "Synthesized from project networking evidence"
+    assert result["recommendations"]
+
+
+def test_assistant_service_answers_platform_knowledge(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: (_ for _ in ()).throw(AssertionError("provider parse should be skipped for platform knowledge")),
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "answer_platform_knowledge",
+        lambda query, provider: {
+            "answer": "A floating IP is a public address that can be associated with a Neutron port.",
+            "confidence": 0.9,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what is a floating ip?", auth=None)
+
+    assert result["intent"] == "platform_knowledge"
+    assert result["mode"] == "platform_knowledge"
+    assert "public address" in result["answer"]
+    assert result["parser_source"] == "task-router"
+    assert result["answer_source"] == "xerotier"
+
+
+def test_assistant_service_answers_platform_knowledge_for_router_definition(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: (_ for _ in ()).throw(AssertionError("provider parse should be skipped for platform knowledge")),
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "answer_platform_knowledge",
+        lambda query, provider: {
+            "answer": "A router connects networks and can provide external gateway access.",
+            "confidence": 0.9,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what is a router?", auth=None)
+
+    assert result["intent"] == "platform_knowledge"
+    assert result["mode"] == "platform_knowledge"
+    assert "connects networks" in result["answer"]
+    assert result["parser_source"] == "task-router"
+
+
+def test_assistant_service_answers_platform_knowledge_for_vm_howto(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: (_ for _ in ()).throw(AssertionError("provider parse should be skipped for platform knowledge")),
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "answer_platform_knowledge",
+        lambda query, provider: {
+            "answer": "In OpenStack, freezing a VM usually maps to suspend or pause behavior depending on the workflow.",
+            "confidence": 0.82,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("how do i freeze my vm?", auth=None)
+
+    assert result["intent"] == "platform_knowledge"
+    assert result["mode"] == "platform_knowledge"
+    assert "suspend or pause" in result["answer"]
+    assert result["parser_source"] == "task-router"
+
+
+def test_assistant_service_coerces_string_confidence_for_platform_knowledge(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "answer_platform_knowledge",
+        lambda query, provider: {
+            "answer": "A floating IP is a public address.",
+            "confidence": "High",
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what is a floating ip?", auth=None)
+
+    assert result["intent"] == "platform_knowledge"
+    assert result["confidence"] == 0.85
+
+
+def test_assistant_service_answers_general_chat(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "unknown",
+            "resource_kind": "",
+            "resource_name": "",
+            "needs_clarification": False,
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "answer_general_chat",
+        lambda query, provider: {
+            "answer": "42 is a classic answer, but meaning is what you make of it.",
+            "confidence": 0.7,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what's the meaning of life", auth=None)
+
+    assert result["intent"] == "general_chat"
+    assert result["mode"] == "general_chat"
+    assert "42" in result["answer"]
+    assert result["parser_source"] == "xerotier"
+    assert result["answer_source"] == "xerotier"
+
+
+def test_assistant_service_overrides_provider_network_summary_for_diagnosis(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "project_network_summary",
+            "resource_kind": "project",
+            "resource_name": "",
+            "needs_clarification": False,
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "build_project_network_diagnosis_evidence",
+        lambda project_id, project_name, auth=None: {
+            "scope": {"project_id": project_id, "project_name": project_name},
+            "summary": {"network_count": 7, "router_count": 1, "port_count": 30, "floating_ip_count": 13},
+            "signals": {"high_risk_security_groups": 2},
+            "findings": ["2 security groups have high-risk audit findings."],
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "synthesize_network_diagnosis",
+        lambda query, evidence, provider: {
+            "answer": "Start with the high-risk security groups.",
+            "findings": ["2 security groups have high-risk audit findings."],
+            "recommendations": ["Review those groups first."],
+            "confidence": 0.81,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "What should I look at first if networking feels unhealthy for this project?",
+        auth=None,
+    )
+
+    assert result["intent"] == "network_diagnosis"
+    assert result["mode"] == "grounded_diagnosis"
+    assert "high-risk security groups" in result["answer"]
+
+
+def test_assistant_service_overrides_provider_unknown_for_general_chat(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "unknown",
+            "resource_kind": "",
+            "resource_name": "",
+            "needs_clarification": False,
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "answer_general_chat",
+        lambda query, provider: {
+            "answer": "42 is the classic punchline.",
+            "confidence": 0.7,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what is the meaning of life?", auth=None)
+
+    assert result["intent"] == "general_chat"
+    assert result["mode"] == "general_chat"
+    assert "42" in result["answer"]
 
 
 def test_ports_endpoints_return_items(monkeypatch):
@@ -783,10 +2247,12 @@ def test_get_project_inventory_backfills_compute_quota_usage_from_instances(monk
     monkeypatch.setattr(
         resource_helpers,
         "get_project_instances",
-        lambda auth=None: [
-            {"project_id": "proj-1", "id": "vm-1", "vcpus": 4, "ram_mb": 8192},
-            {"project_id": "proj-1", "id": "vm-2", "vcpus": 8, "ram_mb": 16384},
-            {"project_id": "proj-2", "id": "vm-3", "vcpus": 2, "ram_mb": 4096},
+        lambda auth=None, project_id="": [
+            item for item in [
+                {"project_id": "proj-1", "id": "vm-1", "vcpus": 4, "ram_mb": 8192},
+                {"project_id": "proj-1", "id": "vm-2", "vcpus": 8, "ram_mb": 16384},
+                {"project_id": "proj-2", "id": "vm-3", "vcpus": 2, "ram_mb": 4096},
+            ] if not project_id or item["project_id"] == project_id
         ],
     )
     monkeypatch.setattr(web_server.openstack_ops, "get_project_vm_distribution", lambda auth=None: [])

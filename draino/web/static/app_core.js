@@ -277,6 +277,7 @@ function toggleHints() {
 
 function showSessionExpiredOverlay() {
   sessionExpired = true;
+  if (typeof resetAssistantState === 'function') resetAssistantState();
   document.getElementById('session-expired-overlay')?.classList.add('open');
 }
 
@@ -804,6 +805,7 @@ async function bootstrapSession() {
 
 async function logout() {
   logoutInProgress = true;
+  if (typeof resetAssistantState === 'function') resetAssistantState();
   try {
     await fetch('/api/session', { method: 'DELETE' });
   } catch (_) {}
