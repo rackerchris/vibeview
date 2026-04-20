@@ -64,6 +64,7 @@ const nodeDetailCache = {};   // node_name → { loading, k8s, nova, error }
 const nodeMetricsCache = {};  // node_name → { loading, current, history, error }
 const nodeDrainPreflightCache = {}; // node_name → { loading, summary, evictable, skipped, blockers, warning, error }
 const nodeEvacuatePreflightCache = {}; // node_name → { loading, summary, items, warning, error }
+const nodeEvacuationResidentsCache = {}; // node_name → { loading, summary, items, warning, error, fetchedAt }
 const nodeNetStatsCache = {}; // node_name → { loading, interfaces, error, fetchedAt }
 const nodeIrqBalanceCache = {}; // node_name → { loading, interfaces, error, fetchedAt }
 const nodeSarTrendsCache = {}; // node_name → { loading, summary, interfaces, error, fetchedAt }
@@ -932,6 +933,7 @@ function onStateUpdate(msg) {
   const prevIsEtcd = prevNode?.is_etcd;
   const nextNode = normaliseIncomingNode(msg.data, prevNode);
   nodes[msg.node] = nextNode;
+  if (typeof markActionConfirmDirty === 'function') markActionConfirmDirty(msg.node);
   // Clear individual migrate state when a full workflow kicks off
   if (nextNode.phase === 'running' && prevPhase !== 'running') {
     Object.keys(instanceMigrateStates).forEach(k => delete instanceMigrateStates[k]);
@@ -940,6 +942,13 @@ function onStateUpdate(msg) {
   trackStepTimes(msg.node, nextNode.steps || []);
   updateSidebarRow(msg.node);
   if (msg.node === selectedNode) {
+    if (
+      nextNode.is_compute &&
+      (nextNode.nova_evacuation_status === 'disabled' || nextNode.nova_evacuation_status === 'blocked' || nextNode.phase === 'running') &&
+      typeof loadNodeEvacuationResidents === 'function'
+    ) {
+      loadNodeEvacuationResidents(msg.node);
+    }
     if (nextNode.is_etcd && !prevIsEtcd) ensureSelectedEtcdHealthCheck();
     renderInfraDetail();
   } else if (nextNode.is_etcd && selectedNode && nodes[selectedNode]?.is_etcd && activeTab === 'summary') {

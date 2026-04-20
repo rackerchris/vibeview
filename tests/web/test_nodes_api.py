@@ -289,6 +289,65 @@ def test_node_evacuate_preflight_endpoint_summarises_instances(monkeypatch):
     assert "Amphora" in body["warning"]
 
 
+def test_node_evacuation_residents_endpoint_merges_live_and_workflow_state(monkeypatch):
+    monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
+    monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
+
+    class FakeConn:
+        def authorize(self):
+            return None
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
+    monkeypatch.setattr(
+        web_server.openstack_ops,
+        "get_instances_preflight",
+        lambda hypervisor, auth=None: [
+            {"id": "vm-1", "name": "web-1", "status": "ACTIVE", "is_amphora": False, "is_volume_backed": True, "vcpus": 2, "ram_mb": 4096},
+            {"id": "amp-1", "name": "amphora-1", "status": "ACTIVE", "is_amphora": True, "is_volume_backed": True, "vcpus": 1, "ram_mb": 1024},
+        ],
+    )
+
+    payload = {
+        "kubernetes": {"server": "https://cluster.example:6443", "token": "token-1", "skip_tls_verify": False},
+        "openstack": {
+            "auth_url": "https://keystone.example/v3",
+            "username": "ops-user",
+            "password": "secret",
+            "project_name": "admin",
+            "user_domain_name": "Default",
+            "project_domain_name": "Default",
+        },
+    }
+
+    with TestClient(web_server.fastapi_app) as client:
+        login = client.post("/api/session", json=payload)
+        assert login.status_code == 200
+        record = next(iter(web_server._sessions._sessions.values()))
+        state = NodeState(k8s_name="node-a", hypervisor="hv-a", is_compute=True)
+        state.instances = [
+            SimpleNamespace(id="vm-1", migration_status="failed", failover_status=None, lb_id=None, status="ACTIVE", is_amphora=False),
+            SimpleNamespace(id="amp-1", migration_status=None, failover_status="failing_over", lb_id="lb-1", status="ACTIVE", is_amphora=True),
+        ]
+        record.server.node_states["node-a"] = state
+        resp = client.get("/api/nodes/node-a/evacuation-residents")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"] == {
+        "instances": 2,
+        "regular_vms": 1,
+        "amphora": 1,
+        "active": 1,
+        "migrating": 0,
+        "failed": 1,
+        "failover_pending": 1,
+        "failover_failed": 0,
+    }
+    assert body["items"][0]["migration_status"] == "failed" or body["items"][1]["migration_status"] == "failed"
+    assert any(item["failover_status"] == "failing_over" for item in body["items"])
+
+
 def test_node_network_stats_endpoint_returns_agent_data(monkeypatch):
     monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
     monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])

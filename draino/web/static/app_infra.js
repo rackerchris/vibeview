@@ -29,6 +29,9 @@ function selectNode(name) {
   if (shouldLoadNodeDetail(name)) loadNodeDetail(name);
   loadNodeDrainPreflight(name);
   if (nd?.is_compute) loadNodeEvacuatePreflight(name);
+  if (nd?.is_compute && (nd.nova_evacuation_status === 'disabled' || nd.nova_evacuation_status === 'blocked' || nd.phase === 'running')) {
+    loadNodeEvacuationResidents(name);
+  }
   if (activeTab === 'monitor') {
     if (shouldLoadNodeMetrics(name)) loadNodeMetrics(name);
     _ensureNetworkDataLoaded(name);
@@ -94,6 +97,36 @@ async function loadNodeEvacuatePreflight(name, force = false) {
     };
   } catch (e) {
     nodeEvacuatePreflightCache[name] = {
+      loading: false,
+      summary: {},
+      items: [],
+      warning: '',
+      error: String(e),
+      fetchedAt: new Date(),
+    };
+  }
+  if (selectedNode === name && nodes[name]) renderInfraDetail();
+}
+
+async function loadNodeEvacuationResidents(name, force = false) {
+  const cached = nodeEvacuationResidentsCache[name];
+  if (!force && cached?.loading) return;
+  nodeEvacuationResidentsCache[name] = { ...(cached || {}), loading: true, error: null };
+  if (selectedNode === name && nodes[name]) renderInfraDetail();
+  try {
+    const qs = force ? '?refresh=1' : '';
+    const resp = await fetch(`/api/nodes/${encodeURIComponent(name)}/evacuation-residents${qs}`);
+    const json = await resp.json();
+    nodeEvacuationResidentsCache[name] = {
+      loading: false,
+      summary: json.summary || {},
+      items: json.items || [],
+      warning: json.warning || '',
+      error: json.error || null,
+      fetchedAt: new Date(),
+    };
+  } catch (e) {
+    nodeEvacuationResidentsCache[name] = {
       loading: false,
       summary: {},
       items: [],

@@ -19,6 +19,7 @@ function renderSummaryTab(nd) {
         : 'Not Ready for Maintenance';
   const drainPreflight = nodeDrainPreflightCache[nd.k8s_name] || { loading: true, summary: {}, evictable: [], skipped: [], blockers: [] };
   const evacuatePreflight = nodeEvacuatePreflightCache[nd.k8s_name] || { loading: nd.is_compute, summary: {}, items: [] };
+  const evacuationResidents = nodeEvacuationResidentsCache[nd.k8s_name] || { loading: false, summary: {}, items: [] };
 
   function preflightCountLine(label, value, tone = '') {
     return `<div class="mrow"><span class="ml">${esc(label)}</span><span class="mv ${tone}">${esc(String(value ?? 0))}</span></div>`;
@@ -179,6 +180,23 @@ function renderSummaryTab(nd) {
           ${preflightCountLine('Active', evacuatePreflight.summary?.active || 0)}
           ${evacuatePreflight.items?.length ? `<div class="mrow"><span class="ml">Sample instances</span><span class="mv" title="${esc(evacuatePreflight.items.map(item => `${item.name} (${item.status})`).join('\n'))}">${esc(evacuatePreflight.items.slice(0, 3).map(item => item.name).join(', '))}${evacuatePreflight.items.length > 3 ? esc(` +${evacuatePreflight.items.length - 3} more`) : ''}</span></div>` : `<div class="mrow"><span class="ml">Sample instances</span><span class="mv">none</span></div>`}
           ${evacuatePreflight.warning ? `<div class="runtime-note" style="margin-top:8px">${esc(evacuatePreflight.warning)}</div>` : ''}
+        ` : ''}
+      </div>
+    </div>`;
+  }
+
+  if (nd.is_compute && (novaEvacStatus === 'disabled' || novaEvacStatus === 'blocked')) {
+    h += `<div class="card">
+      <div class="card-title">Current Host Residents</div>
+      <div class="card-body">
+        ${evacuationResidents.loading ? `<div class="runtime-note"><span class="spinner">⟳</span> Checking current host residents…</div>` : ''}
+        ${evacuationResidents.error ? `<div class="err-chip">⚠ ${esc(evacuationResidents.error)}</div>` : ''}
+        ${!evacuationResidents.loading && !evacuationResidents.error ? `
+          ${preflightCountLine('Instances still present', evacuationResidents.summary?.instances || 0, (evacuationResidents.summary?.instances || 0) > 0 ? 'yellow' : '')}
+          ${preflightCountLine('Migration failed', evacuationResidents.summary?.failed || 0, (evacuationResidents.summary?.failed || 0) > 0 ? 'red' : '')}
+          ${preflightCountLine('Amphora remaining', evacuationResidents.summary?.amphora || 0, (evacuationResidents.summary?.amphora || 0) > 0 ? 'yellow' : '')}
+          ${evacuationResidents.items?.length ? `<div class="mrow"><span class="ml">Current names</span><span class="mv" title="${esc(evacuationResidents.items.map(item => `${item.name} (${item.status})`).join('\n'))}">${esc(evacuationResidents.items.slice(0, 4).map(item => item.name).join(', '))}${evacuationResidents.items.length > 4 ? esc(` +${evacuationResidents.items.length - 4} more`) : ''}</span></div>` : `<div class="mrow"><span class="ml">Current names</span><span class="mv">none</span></div>`}
+          ${evacuationResidents.warning ? `<div class="runtime-note" style="margin-top:8px">${esc(evacuationResidents.warning)}</div>` : ''}
         ` : ''}
       </div>
     </div>`;

@@ -62,6 +62,58 @@ class InstancePortStatsRequest(BaseModel):
     port_ids: list[str]
 
 
+def _resident_state_map(state) -> dict[str, dict]:
+    if state is None:
+        return {}
+    result: dict[str, dict] = {}
+    for item in (state.instances or []):
+        result[item.id] = {
+            "migration_status": item.migration_status,
+            "failover_status": item.failover_status,
+            "lb_id": item.lb_id,
+            "status": item.status,
+            "is_amphora": bool(item.is_amphora),
+        }
+    return result
+
+
+def _merge_evacuation_residents(items: list[dict], state) -> dict:
+    state_map = _resident_state_map(state)
+    merged: list[dict] = []
+    for item in items:
+        workflow = state_map.get(item.get("id"), {})
+        is_amphora = bool(item.get("is_amphora") or workflow.get("is_amphora"))
+        merged.append({
+            **item,
+            "is_amphora": is_amphora,
+            "migration_status": workflow.get("migration_status"),
+            "failover_status": workflow.get("failover_status"),
+            "lb_id": workflow.get("lb_id"),
+        })
+
+    regular_vms = [item for item in merged if not item.get("is_amphora")]
+    amphora = [item for item in merged if item.get("is_amphora")]
+    active = [item for item in regular_vms if str(item.get("status") or "").upper() == "ACTIVE"]
+    migrating = [item for item in regular_vms if item.get("migration_status") not in (None, "", "complete", "failed")]
+    failed = [item for item in regular_vms if item.get("migration_status") == "failed"]
+    failover_pending = [item for item in amphora if item.get("failover_status") not in (None, "", "complete", "failed")]
+    failover_failed = [item for item in amphora if item.get("failover_status") == "failed"]
+
+    return {
+        "items": merged,
+        "summary": {
+            "instances": len(merged),
+            "regular_vms": len(regular_vms),
+            "amphora": len(amphora),
+            "active": len(active),
+            "migrating": len(migrating),
+            "failed": len(failed),
+            "failover_pending": len(failover_pending),
+            "failover_failed": len(failover_failed),
+        },
+    }
+
+
 @router.get("/api/ovn/lsp/{port_id}")
 async def api_ovn_port_detail(port_id: str, request: Request):
     session = _require_session_record()(request)
@@ -247,6 +299,59 @@ async def api_node_evacuate_preflight(node_name: str, request: Request):
         "warning": warning,
         "error": None,
     }
+
+
+@router.get("/api/nodes/{node_name}/evacuation-residents")
+async def api_node_evacuation_residents(node_name: str, request: Request):
+    session = _require_session_record()(request)
+    state = session.server.node_states.get(node_name)
+    if state is None:
+        return {"node": node_name, "items": [], "summary": {}, "warning": None, "error": f"Unknown node '{node_name}'"}
+    if not state.is_compute:
+        return {
+            "node": node_name,
+            "items": [],
+            "summary": {"instances": 0, "regular_vms": 0, "amphora": 0, "active": 0, "migrating": 0, "failed": 0, "failover_pending": 0, "failover_failed": 0},
+            "warning": "Node is not a compute host; no Nova residents apply.",
+            "error": None,
+        }
+    if session.server.openstack_auth is None:
+        return {
+            "node": node_name,
+            "items": [],
+            "summary": {"instances": 0, "regular_vms": 0, "amphora": 0, "active": 0, "migrating": 0, "failed": 0, "failover_pending": 0, "failover_failed": 0},
+            "warning": None,
+            "error": "OpenStack credentials are required to inspect current Nova residents.",
+        }
+    try:
+        current = await _run_with_timeout(openstack_ops.get_instances_preflight, state.hypervisor, session.server.openstack_auth)
+        merged = _merge_evacuation_residents(current, state)
+        warning = None
+        if merged["summary"]["instances"]:
+            warning = f"{merged['summary']['instances']} instance(s) currently remain on this host."
+        return {
+            "node": node_name,
+            "items": merged["items"],
+            "summary": merged["summary"],
+            "warning": warning,
+            "error": None,
+        }
+    except TimeoutError:
+        return {
+            "node": node_name,
+            "items": [],
+            "summary": {"instances": 0, "regular_vms": 0, "amphora": 0, "active": 0, "migrating": 0, "failed": 0, "failover_pending": 0, "failover_failed": 0},
+            "warning": None,
+            "error": f"Timed out after {_RESOURCE_DETAIL_TIMEOUT_SECONDS:.0f}s while loading current evacuation residents",
+        }
+    except Exception as exc:
+        return {
+            "node": node_name,
+            "items": [],
+            "summary": {"instances": 0, "regular_vms": 0, "amphora": 0, "active": 0, "migrating": 0, "failed": 0, "failover_pending": 0, "failover_failed": 0},
+            "warning": None,
+            "error": str(exc),
+        }
 
 
 @router.get("/api/nodes/{node_name}/network-stats")

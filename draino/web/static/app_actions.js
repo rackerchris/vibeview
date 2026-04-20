@@ -1,6 +1,8 @@
 'use strict';
 
 let pendingActionConfirm = null;
+let actionConfirmTimer = null;
+const ACTION_CONFIRM_STALE_MS = 30000;
 
 // ════════════════════════════════════════════════════════════════════════════
 // § ACTION BUTTONS
@@ -55,9 +57,11 @@ function actionRefreshNode() {
   delete nodeMetricsCache[selectedNode];
   delete nodeDrainPreflightCache[selectedNode];
   delete nodeEvacuatePreflightCache[selectedNode];
+  delete nodeEvacuationResidentsCache[selectedNode];
   loadNodeDetail(selectedNode, true);
   loadNodeDrainPreflight(selectedNode, true);
   if (nodes[selectedNode]?.is_compute) loadNodeEvacuatePreflight(selectedNode, true);
+  if (nodes[selectedNode]?.is_compute) loadNodeEvacuationResidents(selectedNode, true);
   if (activeTab === 'monitor') loadNodeMetrics(selectedNode, true);
 }
 
@@ -66,9 +70,11 @@ function actionRefreshAll()  {
   Object.keys(nodeMetricsCache).forEach((name) => delete nodeMetricsCache[name]);
   Object.keys(nodeDrainPreflightCache).forEach((name) => delete nodeDrainPreflightCache[name]);
   Object.keys(nodeEvacuatePreflightCache).forEach((name) => delete nodeEvacuatePreflightCache[name]);
+  Object.keys(nodeEvacuationResidentsCache).forEach((name) => delete nodeEvacuationResidentsCache[name]);
   if (selectedNode) loadNodeDetail(selectedNode, true);
   if (selectedNode) loadNodeDrainPreflight(selectedNode, true);
   if (selectedNode && nodes[selectedNode]?.is_compute) loadNodeEvacuatePreflight(selectedNode, true);
+  if (selectedNode && nodes[selectedNode]?.is_compute) loadNodeEvacuationResidents(selectedNode, true);
   if (selectedNode && activeTab === 'monitor') loadNodeMetrics(selectedNode, true);
   setNodeListRefreshing(true);
   wsSend({ action: 'refresh' });
@@ -158,6 +164,24 @@ function buildActionStat(label, value) {
   return `<div class="action-confirm-stat"><div class="action-confirm-stat-label">${esc(label)}</div><div class="action-confirm-stat-value">${esc(String(value ?? 0))}</div></div>`;
 }
 
+function actionConfirmCacheFor(kind, nodeName) {
+  if (!nodeName) return null;
+  return kind === 'drain' ? nodeDrainPreflightCache[nodeName] : nodeEvacuatePreflightCache[nodeName];
+}
+
+function actionConfirmAgeText(cache) {
+  const fetchedAt = cache?.fetchedAt ? new Date(cache.fetchedAt) : null;
+  if (!fetchedAt || Number.isNaN(fetchedAt.getTime())) return 'not yet fetched';
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - fetchedAt.getTime()) / 1000));
+  return ageSeconds < 2 ? 'just now' : `${ageSeconds}s ago`;
+}
+
+function actionConfirmIsStale(config, cache) {
+  if (!cache?.fetchedAt) return true;
+  if (config?.stateDirty) return true;
+  return (Date.now() - new Date(cache.fetchedAt).getTime()) > ACTION_CONFIRM_STALE_MS;
+}
+
 function buildDrainConfirmHtml(preview) {
   const evictable = Number(preview.summary?.evictable || 0);
   const skipped = Number(preview.summary?.skipped || 0);
@@ -218,21 +242,76 @@ function buildEvacuateConfirmHtml(preview) {
 }
 
 function openActionConfirm(config) {
-  pendingActionConfirm = config;
+  pendingActionConfirm = { ...config, openedAt: Date.now(), stateDirty: false };
   document.getElementById('action-confirm-title').textContent = config.title || 'Confirm Action';
   document.getElementById('action-confirm-node').textContent = config.node || '';
-  document.getElementById('action-confirm-body').innerHTML = config.bodyHtml || '';
   const submit = document.getElementById('action-confirm-submit');
-  submit.textContent = config.submitLabel || 'Continue';
-  submit.className = config.submitClass || 'btn primary';
-  submit.disabled = !!config.blocked;
-  submit.title = config.blocked ? 'Resolve the blocking conditions before continuing.' : '';
+  submit.textContent = pendingActionConfirm.submitLabel || 'Continue';
+  submit.className = pendingActionConfirm.submitClass || 'btn primary';
+  renderActionConfirm();
   document.getElementById('action-confirm-overlay').classList.add('open');
+  if (actionConfirmTimer) clearInterval(actionConfirmTimer);
+  actionConfirmTimer = setInterval(renderActionConfirm, 1000);
 }
 
 function closeActionConfirm() {
   pendingActionConfirm = null;
+  if (actionConfirmTimer) clearInterval(actionConfirmTimer);
+  actionConfirmTimer = null;
   document.getElementById('action-confirm-overlay').classList.remove('open');
+}
+
+function renderActionConfirm() {
+  if (!pendingActionConfirm) return;
+  const cache = actionConfirmCacheFor(pendingActionConfirm.kind, pendingActionConfirm.node);
+  const stale = actionConfirmIsStale(pendingActionConfirm, cache);
+  const changed = !!pendingActionConfirm.stateDirty;
+  const statusTone = changed ? 'block' : stale ? 'warn' : '';
+  const statusText = changed
+    ? 'Node state changed while this dialog was open. Refresh preflight before continuing.'
+    : stale
+      ? 'Preflight is stale. Refresh before continuing.'
+      : `Preflight last checked ${actionConfirmAgeText(cache)}.`;
+  const body = `
+    <div class="action-confirm-toolbar">
+      <div class="action-confirm-note ${statusTone}">${esc(statusText)}</div>
+      <button class="btn" type="button" onclick="refreshActionConfirm()">↺ Refresh Preflight</button>
+    </div>
+    ${pendingActionConfirm.bodyHtml || ''}
+  `;
+  document.getElementById('action-confirm-body').innerHTML = body;
+  const submit = document.getElementById('action-confirm-submit');
+  const blocked = !!pendingActionConfirm.blocked || stale || changed;
+  submit.disabled = blocked;
+  submit.title = pendingActionConfirm.blocked
+    ? 'Resolve the blocking conditions before continuing.'
+    : (stale || changed)
+      ? 'Refresh preflight before continuing.'
+      : '';
+}
+
+async function refreshActionConfirm() {
+  if (!pendingActionConfirm) return;
+  const { kind, node } = pendingActionConfirm;
+  if (kind === 'drain') {
+    await loadNodeDrainPreflight(node, true);
+    const preview = nodeDrainPreflightCache[node] || {};
+    pendingActionConfirm.bodyHtml = buildDrainConfirmHtml(preview);
+    pendingActionConfirm.blocked = Number(preview.summary?.blocking || 0) > 0 || !!preview.error;
+  } else if (kind === 'evacuate') {
+    await loadNodeEvacuatePreflight(node, true);
+    const preview = nodeEvacuatePreflightCache[node] || {};
+    pendingActionConfirm.bodyHtml = buildEvacuateConfirmHtml(preview);
+    pendingActionConfirm.blocked = false;
+  }
+  pendingActionConfirm.stateDirty = false;
+  renderActionConfirm();
+}
+
+function markActionConfirmDirty(nodeName) {
+  if (!pendingActionConfirm || pendingActionConfirm.node !== nodeName) return;
+  pendingActionConfirm.stateDirty = true;
+  renderActionConfirm();
 }
 
 function confirmAction() {

@@ -2378,6 +2378,7 @@ body.no-hints .vmware-ref-card { display: none !important; }
 .modal-actions { display: flex; gap: 10px; margin-top: 16px; justify-content: flex-end; }
 .action-confirm-box { width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
 .action-confirm-body { font-size: 12px; color: var(--text); line-height: 1.6; }
+.action-confirm-toolbar { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; margin-bottom: 10px; }
 .action-confirm-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
 .action-confirm-stat { border: 1px solid var(--border); border-radius: 4px; background: var(--gray-bg); padding: 8px 10px; }
 .action-confirm-stat-label { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.3px; }
