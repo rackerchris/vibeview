@@ -393,6 +393,7 @@ function markActionConfirmDirty(nodeName) {
 function confirmAction() {
   if (!pendingActionConfirm) return;
   const { kind, node } = pendingActionConfirm;
+  if (['drain', 'undrain', 'evacuate', 'enable_nova'].includes(kind)) recordMaintenanceActionStart(node, kind);
   closeActionConfirm();
   if (kind === 'drain') wsSend({ action: 'drain_quick', node });
   if (kind === 'evacuate') wsSend({ action: 'evacuate', node });

@@ -10,6 +10,7 @@ function renderSummaryTab(nd) {
   const novaEvacStatus = nd.nova_evacuation_status || 'clear';
   const maintenanceGuidance = getNodeMaintenanceGuidance(nd);
   const maintenanceSteps = uniqueGuidanceLines(maintenanceGuidance.steps);
+  const maintenanceHistory = maintenanceHistoryFor(nd.k8s_name);
   const maintenanceLabel = nd.maintenance_ready
     ? 'Ready for Maintenance'
     : k8sDrainStatus !== 'drained'
@@ -208,6 +209,44 @@ function renderSummaryTab(nd) {
       </div>
     </div>`;
   }
+
+  h += `<div class="card">
+    <div class="card-title">
+      <span class="card-title-label">Recent Maintenance Actions</span>
+      <span class="card-title-actions">
+        ${maintenanceHistory.length ? `<button class="btn" type="button" onclick="clearMaintenanceHistory('${escAttr(nd.k8s_name)}')">Clear Local History</button>` : ''}
+      </span>
+    </div>
+    <div class="card-body">
+      ${maintenanceHistory.length ? maintenanceHistory.map((entry) => {
+        const tone = entry.status === 'completed'
+          ? 'green'
+          : entry.status === 'failed' || entry.status === 'blocked'
+            ? 'red'
+            : entry.status === 'partial'
+              ? 'yellow'
+              : 'blue';
+        const label = entry.status === 'running'
+          ? 'running'
+          : entry.status === 'completed'
+            ? 'completed'
+            : entry.status === 'blocked'
+              ? 'blocked'
+              : entry.status === 'partial'
+                ? 'partial'
+                : 'failed';
+        const when = entry.updatedAt || entry.startedAt;
+        return `<div class="maintenance-history-item">
+          <div class="maintenance-history-row">
+            <span class="maintenance-history-label">${esc(entry.label)}</span>
+            <span class="badge ${tone}">${esc(label)}</span>
+          </div>
+          <div class="maintenance-history-meta">${esc(new Date(when).toLocaleString('en-GB', { hour12: false }))}</div>
+          ${entry.detail ? `<div class="maintenance-history-detail">${esc(entry.detail)}</div>` : ''}
+        </div>`;
+      }).join('') : '<div class="runtime-note">No maintenance actions recorded in this browser yet.</div>'}
+    </div>
+  </div>`;
 
   {
     const rc = nd.k8s_cordoned ? 'gray' : nd.k8s_ready ? 'green' : 'red';

@@ -74,6 +74,117 @@ const nodeInstancePortStatsCache = {}; // node_name -> { loading, portsById, err
 const instanceDetailCache = {}; // instance_id -> { loading, data, error }
 const expandedInstanceIdByNode = {}; // node_name -> instance_id
 const expandedPortIdByInstance = {}; // instance_id -> port_id
+const MAINTENANCE_HISTORY_STORAGE_KEY = 'vibeviewMaintenanceHistory';
+let nodeMaintenanceHistory = loadMaintenanceHistory();
+const pendingMaintenanceHistory = {};
+
+function loadMaintenanceHistory() {
+  try {
+    const raw = localStorage.getItem(MAINTENANCE_HISTORY_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function persistMaintenanceHistory() {
+  try {
+    localStorage.setItem(MAINTENANCE_HISTORY_STORAGE_KEY, JSON.stringify(nodeMaintenanceHistory));
+  } catch (_) {}
+}
+
+function maintenanceActionLabel(action) {
+  return {
+    drain: 'Drain',
+    undrain: 'Undrain',
+    evacuate: 'Evacuate',
+    enable_nova: 'Re-enable Nova',
+  }[action] || String(action || 'Action');
+}
+
+function maintenanceHistoryFor(nodeName) {
+  return Array.isArray(nodeMaintenanceHistory[nodeName]) ? nodeMaintenanceHistory[nodeName] : [];
+}
+
+function pushMaintenanceHistoryEntry(nodeName, entry) {
+  const current = maintenanceHistoryFor(nodeName);
+  nodeMaintenanceHistory[nodeName] = [entry, ...current].slice(0, 8);
+  persistMaintenanceHistory();
+}
+
+function updateMaintenanceHistoryEntry(nodeName, entryId, updates) {
+  const current = maintenanceHistoryFor(nodeName);
+  nodeMaintenanceHistory[nodeName] = current.map((entry) => (
+    entry.id === entryId ? { ...entry, ...updates, updatedAt: new Date().toISOString() } : entry
+  ));
+  persistMaintenanceHistory();
+}
+
+function recordMaintenanceActionStart(nodeName, action, detail = '') {
+  if (!nodeName || !action) return;
+  const entry = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    action,
+    label: maintenanceActionLabel(action),
+    status: 'running',
+    detail,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  pendingMaintenanceHistory[nodeName] = { action, entryId: entry.id };
+  pushMaintenanceHistoryEntry(nodeName, entry);
+}
+
+function finishMaintenanceAction(nodeName, status, detail = '') {
+  const pending = pendingMaintenanceHistory[nodeName];
+  if (!pending) return;
+  updateMaintenanceHistoryEntry(nodeName, pending.entryId, { status, detail });
+  delete pendingMaintenanceHistory[nodeName];
+}
+
+function reconcileMaintenanceHistory(nodeName, prevNode, nextNode) {
+  const pending = pendingMaintenanceHistory[nodeName];
+  if (!pending) return;
+  if (pending.action === 'drain') {
+    if (nextNode.k8s_drain_status === 'blocked') return finishMaintenanceAction(nodeName, 'blocked', nextNode.k8s_drain_detail || 'Kubernetes drain blocked');
+    if (nextNode.phase === 'error' || nextNode.k8s_drain_status === 'error') return finishMaintenanceAction(nodeName, 'failed', nextNode.k8s_drain_detail || 'Kubernetes drain failed');
+    if (nextNode.phase === 'idle' && nextNode.k8s_drain_status === 'drained') return finishMaintenanceAction(nodeName, 'completed', nextNode.k8s_drain_detail || 'Kubernetes drain complete');
+    return;
+  }
+  if (pending.action === 'undrain') {
+    if (nextNode.phase === 'error') return finishMaintenanceAction(nodeName, 'failed', nextNode.k8s_drain_detail || 'Kubernetes undrain failed');
+    if (nextNode.phase === 'idle' && !nextNode.k8s_cordoned && nextNode.k8s_drain_status === 'clear') return finishMaintenanceAction(nodeName, 'completed', 'Kubernetes scheduling restored');
+    return;
+  }
+  if (pending.action === 'evacuate') {
+    if (nextNode.nova_evacuation_status === 'blocked') return finishMaintenanceAction(nodeName, 'blocked', nextNode.nova_evacuation_detail || 'Nova evacuation blocked');
+    if (nextNode.phase === 'error' || nextNode.nova_evacuation_status === 'error') return finishMaintenanceAction(nodeName, 'failed', nextNode.nova_evacuation_detail || 'Nova evacuation failed');
+    if ((nextNode.phase === 'complete' || nextNode.phase === 'idle') && nextNode.nova_evacuation_status === 'evacuated') return finishMaintenanceAction(nodeName, 'completed', nextNode.nova_evacuation_detail || 'Hypervisor evacuated');
+    if (prevNode?.phase === 'running' && nextNode.phase === 'idle' && nextNode.nova_evacuation_status === 'disabled') return finishMaintenanceAction(nodeName, 'partial', nextNode.nova_evacuation_detail || 'Nova disabled but host not yet evacuated');
+    return;
+  }
+  if (pending.action === 'enable_nova') {
+    if (nextNode.compute_status === 'up' && nextNode.nova_evacuation_status === 'clear') return finishMaintenanceAction(nodeName, 'completed', nextNode.nova_evacuation_detail || 'Nova compute service enabled');
+  }
+}
+
+function updateMaintenanceHistoryFromLog(nodeName, message) {
+  const pending = pendingMaintenanceHistory[nodeName];
+  if (!pending || !message) return;
+  if (pending.action === 'enable_nova' && message.startsWith('Failed to re-enable Nova')) {
+    finishMaintenanceAction(nodeName, 'failed', message);
+  }
+}
+
+function clearMaintenanceHistory(nodeName) {
+  if (!nodeName) return;
+  delete nodeMaintenanceHistory[nodeName];
+  delete pendingMaintenanceHistory[nodeName];
+  persistMaintenanceHistory();
+  if (selectedNode === nodeName && nodes[nodeName] && activeTab === 'summary') renderSummaryTab(nodes[nodeName]);
+}
 
 function uniqueGuidanceLines(lines) {
   const seen = new Set();
@@ -1046,6 +1157,7 @@ function onStateUpdate(msg) {
   const prevIsEtcd = prevNode?.is_etcd;
   const nextNode = normaliseIncomingNode(msg.data, prevNode);
   nodes[msg.node] = nextNode;
+  reconcileMaintenanceHistory(msg.node, prevNode, nextNode);
   if (typeof markActionConfirmDirty === 'function') markActionConfirmDirty(msg.node);
   // Clear individual migrate state when a full workflow kicks off
   if (nextNode.phase === 'running' && prevPhase !== 'running') {
@@ -1107,6 +1219,7 @@ function onLog(msg) {
     monitorEntriesHtml = ml.innerHTML;
   }
   if (activeView === 'monitor') ml.scrollTop = ml.scrollHeight;
+  if (msg.node && msg.node !== '-') updateMaintenanceHistoryFromLog(msg.node, msg.message || '');
 }
 
 function onRebootConfirmNeeded(msg) {
