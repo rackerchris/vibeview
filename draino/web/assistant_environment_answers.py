@@ -189,7 +189,9 @@ def answer_hypervisor_metric_ranking(
     openstack_auth=None,
     k8s_auth=None,
     intent: str,
+    operator: str = "max",
     answer_label: str,
+    answer_verb: str = "highest",
     answer_suffix: str,
     entity_label: str,
     findings_label: str,
@@ -200,7 +202,12 @@ def answer_hypervisor_metric_ranking(
         facts, errors = _collect_hypervisor_vm_facts(openstack_auth=openstack_auth, k8s_auth=k8s_auth)
     else:
         facts, errors = _collect_hypervisor_detail_facts(openstack_auth=openstack_auth, k8s_auth=k8s_auth)
-    ranked = sorted(facts, key=lambda item: (-int(item.get(metric) or 0), str(item.get("name") or "")))
+    reverse = operator != "min"
+    ranked = sorted(
+        facts,
+        key=lambda item: (int(item.get(metric) or 0), str(item.get("name") or "")),
+        reverse=reverse,
+    )
     if not ranked:
         return {
             "intent": intent,
@@ -217,7 +224,7 @@ def answer_hypervisor_metric_ranking(
     metric_value = _format_metric_value(metric, busiest)
     display_value = f"{metric_value} {answer_suffix}" if include_suffix_in_value else metric_value
     answer_lines = [
-        f"The hypervisor with the highest {answer_label} is `{busiest.get('name')}` with `{display_value}`."
+        f"The hypervisor with the {answer_verb} {answer_label} is `{busiest.get('name')}` with `{display_value}`."
     ]
     capacity_text = _format_metric_capacity(metric, busiest)
     if capacity_text:
@@ -389,7 +396,9 @@ def answer_busiest_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> dic
         openstack_auth=openstack_auth,
         k8s_auth=k8s_auth,
         intent="busiest_hypervisor_summary",
+        operator="max",
         answer_label="VM load",
+        answer_verb="highest",
         answer_suffix="running VMs",
         entity_label="hypervisor load",
         findings_label="Top hypervisors by running VMs",
@@ -403,7 +412,9 @@ def answer_highest_ram_hypervisor_summary(openstack_auth=None, k8s_auth=None) ->
         openstack_auth=openstack_auth,
         k8s_auth=k8s_auth,
         intent="highest_ram_hypervisor_summary",
+        operator="max",
         answer_label="RAM usage",
+        answer_verb="highest",
         answer_suffix="RAM in use",
         entity_label="hypervisor RAM usage",
         findings_label="Top hypervisors by RAM in use",
@@ -417,7 +428,9 @@ def answer_highest_cpu_hypervisor_summary(openstack_auth=None, k8s_auth=None) ->
         openstack_auth=openstack_auth,
         k8s_auth=k8s_auth,
         intent="highest_cpu_hypervisor_summary",
+        operator="max",
         answer_label="CPU usage",
+        answer_verb="highest",
         answer_suffix="vCPUs in use",
         entity_label="hypervisor CPU usage",
         findings_label="Top hypervisors by vCPU use",
@@ -431,9 +444,27 @@ def answer_highest_disk_hypervisor_summary(openstack_auth=None, k8s_auth=None) -
         openstack_auth=openstack_auth,
         k8s_auth=k8s_auth,
         intent="highest_disk_hypervisor_summary",
+        operator="max",
         answer_label="local disk usage",
+        answer_verb="highest",
         answer_suffix="local disk in use",
         entity_label="hypervisor disk usage",
         findings_label="Top hypervisors by local disk use",
         include_suffix_in_value=True,
+    )
+
+
+def answer_emptiest_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
+    return answer_hypervisor_metric_ranking(
+        "running_vms",
+        openstack_auth=openstack_auth,
+        k8s_auth=k8s_auth,
+        intent="emptiest_hypervisor_summary",
+        operator="min",
+        answer_label="VM load",
+        answer_verb="lowest",
+        answer_suffix="running VMs",
+        entity_label="hypervisor load",
+        findings_label="Least-loaded hypervisors by running VMs",
+        collector="summary",
     )

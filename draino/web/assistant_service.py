@@ -46,6 +46,7 @@ from .assistant_cluster_answers import (
 )
 from .assistant_environment_answers import (
     answer_busiest_hypervisor_summary,
+    answer_emptiest_hypervisor_summary,
     answer_empty_compute_nodes_summary,
     answer_highest_cpu_hypervisor_summary,
     answer_highest_disk_hypervisor_summary,
@@ -118,6 +119,7 @@ _RESOURCE_SUMMARY_INTENTS = {
     "reboot_needed_summary",
     "empty_compute_nodes_summary",
     "busiest_hypervisor_summary",
+    "emptiest_hypervisor_summary",
     "highest_ram_hypervisor_summary",
     "highest_cpu_hypervisor_summary",
     "highest_disk_hypervisor_summary",
@@ -129,6 +131,7 @@ _ENVIRONMENT_SUMMARY_INTENTS = {
     "reboot_needed_summary",
     "empty_compute_nodes_summary",
     "busiest_hypervisor_summary",
+    "emptiest_hypervisor_summary",
     "highest_ram_hypervisor_summary",
     "highest_cpu_hypervisor_summary",
     "highest_disk_hypervisor_summary",
@@ -574,6 +577,41 @@ def _looks_like_environment_summary_query(query: str) -> bool:
     return environmentish and summaryish
 
 
+def _environment_metric_choices() -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "environment_metric",
+            "id": "busiest_hypervisor_summary",
+            "label": "VM load",
+            "subtext": "Which hypervisor is running the most VMs",
+        },
+        {
+            "kind": "environment_metric",
+            "id": "highest_ram_hypervisor_summary",
+            "label": "RAM usage",
+            "subtext": "Which hypervisor is using the most memory",
+        },
+        {
+            "kind": "environment_metric",
+            "id": "highest_cpu_hypervisor_summary",
+            "label": "CPU usage",
+            "subtext": "Which hypervisor is using the most vCPUs",
+        },
+        {
+            "kind": "environment_metric",
+            "id": "highest_disk_hypervisor_summary",
+            "label": "Disk usage",
+            "subtext": "Which hypervisor is using the most local disk",
+        },
+        {
+            "kind": "environment_metric",
+            "id": "emptiest_hypervisor_summary",
+            "label": "Fewest VMs",
+            "subtext": "Which hypervisor is running the fewest VMs",
+        },
+    ]
+
+
 def _parse_query_fallback(query: str) -> dict[str, Any]:
     text = str(query or "").strip()
     lower = text.lower()
@@ -701,6 +739,40 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "resource_kind": "environment",
             "resource_name": "compute_empty",
             "needs_clarification": False,
+        }
+    if _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "hosts", "nodes")) and _contains_any(lower, ("emptiest", "least busy", "least loaded", "fewest vms", "fewest instances", "lightest load")):
+        return {
+            "intent": "emptiest_hypervisor_summary",
+            "resource_kind": "environment",
+            "resource_name": "hypervisor_empty",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("compute node", "compute nodes", "host", "hosts", "node", "nodes")) and _contains_any(
+        lower,
+        ("busiest", "most busy", "most loaded", "highest", "lowest", "top ", "most", "least"),
+    ) and not _contains_any(
+        lower,
+        (
+            "vm",
+            "vms",
+            "instance",
+            "instances",
+            "ram",
+            "memory",
+            "cpu",
+            "vcpu",
+            "vcpus",
+            "disk",
+            "storage",
+        ),
+    ):
+        return {
+            "intent": "unknown",
+            "resource_kind": "environment_metric",
+            "resource_name": "hypervisor_metric",
+            "needs_clarification": True,
+            "clarifying_question": "What metric do you want to rank hypervisors by?",
+            "choices": _environment_metric_choices(),
         }
     if _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "hosts")) and _contains_any(lower, ("busiest", "most busy", "most loaded", "hosts the most vms", "host the most vms")):
         return {
@@ -927,7 +999,7 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
         "instance_project, instance_ips, instance_networks, project_network_summary, project_storage_summary, "
         "security_group_audit, security_group_lockdown_suggestions, security_group_insecure_check, "
         "etcd_health_summary, mariadb_node_summary, cluster_health_overview, node_ready_summary, control_plane_component_summary, "
-        "kernel_version_summary, missing_node_agent_summary, reboot_needed_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, "
+        "kernel_version_summary, missing_node_agent_summary, reboot_needed_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, "
         "port_attachment_status, port_public_exposure, router_external_status, router_connectivity_summary, "
         "volume_attachment_summary, volume_posture, floating_ip_instance_status, floating_ip_lookup_by_fixed_ip, floating_ip_idle_status, "
         "open_resource, unknown. "
@@ -996,11 +1068,11 @@ def _parse_environment_query_with_provider(query: str, fallback: dict[str, Any] 
     system_prompt = (
         "Classify environment and fleet questions into JSON only. "
         "Allowed intents: kernel_version_summary, missing_node_agent_summary, reboot_needed_summary, "
-        "empty_compute_nodes_summary, busiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, unknown. "
+        "empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, unknown. "
         "Map freeform wording about environment-wide compute, host, node, hypervisor, kernel, RAM, reboot, VM density, or missing agents "
         "to the closest supported intent. "
         "Return keys: intent, resource_kind, resource_name, needs_clarification, clarifying_question. "
-        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, node_agent, reboot, compute_empty, hypervisor_load, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
+        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, node_agent, reboot, compute_empty, hypervisor_load, hypervisor_empty, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
         "Never include markdown."
     )
     user_prompt = json.dumps({"query": query})
@@ -1652,6 +1724,7 @@ def answer_assistant_query(
         "reboot_needed_summary",
         "empty_compute_nodes_summary",
         "busiest_hypervisor_summary",
+        "emptiest_hypervisor_summary",
         "highest_ram_hypervisor_summary",
         "highest_cpu_hypervisor_summary",
         "highest_disk_hypervisor_summary",
@@ -1691,6 +1764,16 @@ def answer_assistant_query(
     locked_kind = str(resolved_kind or "").strip().lower()
     locked_id = str(resolved_id or "").strip()
     locked_label = str(resolved_label or "").strip()
+    if locked_kind == "environment_metric" and locked_id in _ENVIRONMENT_SUMMARY_INTENTS:
+        parsed = {
+            "intent": locked_id,
+            "resource_kind": "environment",
+            "resource_name": locked_label or locked_id,
+            "needs_clarification": False,
+            "parser_source": "choice",
+        }
+        intent = locked_id
+        resource_name = str(parsed.get("resource_name") or "").strip()
     if task == "grounded_diagnosis_network" and intent in {"unknown", "project_network_summary"}:
         intent = "network_diagnosis"
     elif task == "platform_knowledge" and intent in {"unknown", "quota_usage", "quota_limit", "project_network_summary"}:
@@ -1832,6 +1915,8 @@ def answer_assistant_query(
                 "actions": [],
                 "needs_clarification": True,
                 "answer_source": "local",
+                "choices": list(parsed.get("choices") or []),
+                "clarifying_question": parsed.get("clarifying_question") or "",
             }
         response["parser_source"] = parsed.get("parser_source", "fallback")
         response["timings"] = {
@@ -1889,6 +1974,8 @@ def answer_assistant_query(
         response = answer_empty_compute_nodes_summary(auth, k8s_auth)
     elif intent == "busiest_hypervisor_summary":
         response = answer_busiest_hypervisor_summary(auth, k8s_auth)
+    elif intent == "emptiest_hypervisor_summary":
+        response = answer_emptiest_hypervisor_summary(auth, k8s_auth)
     elif intent == "highest_ram_hypervisor_summary":
         response = answer_highest_ram_hypervisor_summary(auth, k8s_auth)
     elif intent == "highest_cpu_hypervisor_summary":

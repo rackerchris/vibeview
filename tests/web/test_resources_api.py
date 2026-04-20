@@ -1582,6 +1582,40 @@ def test_assistant_service_answers_busiest_hypervisor_summary(monkeypatch):
     assert result["answer_source"] == "local"
 
 
+def test_assistant_service_answers_emptiest_hypervisor_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for emptiest hypervisor summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 11, "compute_status": "up"},
+            "cmp-2": {"vm_count": 2, "compute_status": "up"},
+            "cmp-3": {"vm_count": 6, "compute_status": "up"},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes are emptiest?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "emptiest_hypervisor_summary"
+    assert "`cmp-2`" in result["answer"]
+    assert "`2`" in result["answer"]
+    assert "Least-loaded hypervisors by running VMs" in " ".join(result.get("findings") or [])
+    assert result["answer_source"] == "local"
+
+
 def test_assistant_service_answers_highest_ram_hypervisor_summary(monkeypatch):
     monkeypatch.setattr(
         assistant_service,
@@ -1718,6 +1752,95 @@ def test_assistant_service_uses_provider_extraction_for_freeform_environment_que
     assert result["intent"] == "highest_ram_hypervisor_summary"
     assert result["parser_source"] == "xerotier"
     assert result["answer_source"] == "local"
+
+
+def test_fallback_parser_requests_metric_clarification_for_busiest_node():
+    parsed = assistant_service._parse_query_fallback("what is the busiest node?")
+
+    assert parsed["intent"] == "unknown"
+    assert parsed["needs_clarification"] is True
+    assert parsed["clarifying_question"] == "What metric do you want to rank hypervisors by?"
+    assert len(parsed["choices"]) == 5
+    assert parsed["choices"][0]["kind"] == "environment_metric"
+    assert parsed["choices"][0]["id"] == "busiest_hypervisor_summary"
+
+
+def test_assistant_service_resolves_environment_metric_choice(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for environment metric choice questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"vcpus_used": 24, "vcpus": 64, "running_vms": 11},
+            "cmp-2": {"vcpus_used": 37, "vcpus": 64, "running_vms": 9},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "what is the busiest node?",
+        auth=None,
+        k8s_auth=None,
+        resolved_kind="environment_metric",
+        resolved_id="highest_cpu_hypervisor_summary",
+        resolved_label="CPU usage",
+    )
+
+    assert result["intent"] == "highest_cpu_hypervisor_summary"
+    assert result["parser_source"] == "choice"
+    assert result["answer_source"] == "local"
+    assert "`cmp-2`" in result["answer"]
+    assert "`37 vCPUs in use`" in result["answer"]
+
+
+def test_assistant_service_resolves_environment_metric_choice_to_emptiest(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for environment metric choice questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 9, "compute_status": "up"},
+            "cmp-2": {"vm_count": 1, "compute_status": "up"},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "what is the least busy node?",
+        auth=None,
+        k8s_auth=None,
+        resolved_kind="environment_metric",
+        resolved_id="emptiest_hypervisor_summary",
+        resolved_label="Fewest VMs",
+    )
+
+    assert result["intent"] == "emptiest_hypervisor_summary"
+    assert result["parser_source"] == "choice"
+    assert result["answer_source"] == "local"
+    assert "`cmp-2`" in result["answer"]
+    assert "`1`" in result["answer"]
 
 
 def test_fallback_parser_leaves_networking_diagnosis_question_unknown():
