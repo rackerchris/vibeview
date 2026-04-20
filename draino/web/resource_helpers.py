@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import logging
 import time
 from urllib.parse import urlparse
 
@@ -9,6 +10,7 @@ from ..operations import k8s_ops, openstack_ops
 
 _OPEN_WORLD_CIDRS = {"0.0.0.0/0", "::/0"}
 _ADMIN_PORTS = {22, 3389, 5900, 6443}
+_CLONE_LOG = logging.getLogger("draino.clone")
 
 
 def coerce_bool(value: object) -> bool:
@@ -2928,8 +2930,18 @@ def clone_instance(
     keep_metadata: bool = True,
     auth: openstack_ops.OpenStackAuth | None = None,
 ) -> dict:
+    _CLONE_LOG.info(
+        "clone requested instance_id=%s new_name=%s clone_data_volumes=%s create_floating_ip=%s power_on=%s keep_metadata=%s",
+        instance_id,
+        new_name,
+        clone_data_volumes,
+        create_floating_ip,
+        power_on,
+        keep_metadata,
+    )
     conn = openstack_ops._conn(auth=auth)
     volume_proxy = getattr(conn, "block_storage", None) or getattr(conn, "volume", None)
+    _CLONE_LOG.debug("clone step=fetch_source instance_id=%s", instance_id)
     source = conn.compute.get_server(instance_id)
     if source is None:
         raise ValueError("Source instance was not found")
@@ -2951,10 +2963,12 @@ def clone_instance(
     )
     if not flavor_id:
         raise RuntimeError("Unable to resolve source flavor id for clone")
+    _CLONE_LOG.debug("clone step=source_resolved instance_id=%s flavor_id=%s", instance_id, flavor_id)
 
     source_ports = list(conn.network.ports(device_id=instance_id))
     if not source_ports:
         raise RuntimeError("Source instance has no Neutron ports to clone")
+    _CLONE_LOG.debug("clone step=source_ports_resolved instance_id=%s port_count=%s", instance_id, len(source_ports))
 
     created_ports: list[str] = []
     created_volumes: list[str] = []
@@ -2964,8 +2978,10 @@ def clone_instance(
     warnings: list[str] = []
 
     try:
+        _CLONE_LOG.debug("clone step=create_ports start instance_id=%s", instance_id)
         cloned_ports = [_create_port_clone(conn, port, requested_name, project_id) for port in source_ports]
         created_ports = [item["id"] for item in cloned_ports if item.get("id")]
+        _CLONE_LOG.debug("clone step=create_ports complete instance_id=%s created_ports=%s", instance_id, created_ports)
 
         source_floating_network_id = ""
         for port in source_ports:
@@ -2981,6 +2997,7 @@ def clone_instance(
                 break
 
         volume_ids = _server_volume_ids(source)
+        _CLONE_LOG.debug("clone step=source_volumes_resolved instance_id=%s volume_ids=%s", instance_id, volume_ids)
         cloned_volume_records: list[dict] = []
         for volume_id in volume_ids:
             if volume_proxy is None:
@@ -2992,9 +3009,11 @@ def clone_instance(
             device_name = str(attachment.get("device") or "")
             is_root = not getattr(source, "image", None) and _volume_device_rank(device_name)[0] == 0
             if not is_root and not clone_data_volumes:
+                _CLONE_LOG.debug("clone step=skip_data_volume instance_id=%s volume_id=%s", instance_id, volume_id)
                 continue
             source_volume_data = _obj_dict(volume)
             clone_name = f"{requested_name}-{getattr(volume, 'name', None) or source_volume_data.get('name') or volume_id}"
+            _CLONE_LOG.debug("clone step=create_volume start instance_id=%s source_volume_id=%s clone_name=%s", instance_id, volume_id, clone_name)
             cloned = volume_proxy.create_volume(
                 name=clone_name,
                 source_volid=volume_id,
@@ -3018,6 +3037,7 @@ def clone_instance(
                 "is_root": is_root,
                 "name": getattr(cloned_ready, "name", None) or _obj_dict(cloned_ready).get("name") or clone_name,
             })
+            _CLONE_LOG.debug("clone step=create_volume complete instance_id=%s source_volume_id=%s cloned_volume_id=%s", instance_id, volume_id, cloned_id)
 
         block_device_mapping_v2: list[dict] = []
         image_ref = ""
@@ -3043,6 +3063,7 @@ def clone_instance(
                     "device_name": item.get("device_name") or None,
                 })
         else:
+            _CLONE_LOG.debug("clone step=create_snapshot start instance_id=%s", instance_id)
             snapshot_image_id = _compute_create_server_image(conn, instance_id, f"{requested_name}-snapshot")
             image = _wait_for_status(
                 lambda: conn.image.get_image(snapshot_image_id),
@@ -3052,6 +3073,7 @@ def clone_instance(
                 timeout=1800,
             )
             image_ref = getattr(image, "id", None) or _obj_dict(image).get("id") or snapshot_image_id
+            _CLONE_LOG.debug("clone step=create_snapshot complete instance_id=%s snapshot_image_id=%s", instance_id, image_ref)
             for item in sorted(cloned_volume_records, key=lambda row: _volume_device_rank(row.get("device_name", ""))):
                 block_device_mapping_v2.append({
                     "boot_index": "-1",
@@ -3080,11 +3102,14 @@ def clone_instance(
         if key_name:
             server_payload["server"]["key_name"] = key_name
 
+        _CLONE_LOG.debug("clone step=create_server start instance_id=%s new_name=%s", instance_id, requested_name)
         created_server = _compute_create_server(conn, server_payload)
         created_server_id = str(created_server.get("id") or "")
         if not created_server_id:
             raise RuntimeError("Nova did not return a cloned server id")
+        _CLONE_LOG.debug("clone step=create_server complete instance_id=%s server_id=%s", instance_id, created_server_id)
 
+        _CLONE_LOG.debug("clone step=wait_server start instance_id=%s server_id=%s", instance_id, created_server_id)
         server_ready = _wait_for_status(
             lambda: conn.compute.get_server(created_server_id),
             lambda item: getattr(item, "status", None) or _obj_dict(item).get("status"),
@@ -3092,19 +3117,34 @@ def clone_instance(
             {"error"},
             timeout=1800,
         )
+        _CLONE_LOG.debug(
+            "clone step=wait_server complete instance_id=%s server_id=%s status=%s",
+            instance_id,
+            created_server_id,
+            getattr(server_ready, "status", None) or _obj_dict(server_ready).get("status"),
+        )
 
         if create_floating_ip:
             if source_floating_network_id:
+                _CLONE_LOG.debug(
+                    "clone step=create_floating_ip start instance_id=%s network_id=%s port_id=%s",
+                    instance_id,
+                    source_floating_network_id,
+                    cloned_ports[0]["id"],
+                )
                 created_fip = conn.network.create_ip(
                     floating_network_id=source_floating_network_id,
                     port_id=cloned_ports[0]["id"],
                     project_id=project_id,
                 )
                 created_floating_ip_id = getattr(created_fip, "id", None) or _obj_dict(created_fip).get("id") or ""
+                _CLONE_LOG.debug("clone step=create_floating_ip complete instance_id=%s floating_ip_id=%s", instance_id, created_floating_ip_id)
             else:
                 warnings.append("No source floating IP network could be inferred, so no new floating IP was created.")
+                _CLONE_LOG.debug("clone step=create_floating_ip skipped instance_id=%s reason=no_source_floating_network", instance_id)
 
         if not power_on and str(getattr(server_ready, "status", None) or _obj_dict(server_ready).get("status") or "").upper() != "SHUTOFF":
+            _CLONE_LOG.debug("clone step=power_off start instance_id=%s server_id=%s", instance_id, created_server_id)
             conn.compute.stop_server(created_server_id)
             _wait_for_status(
                 lambda: conn.compute.get_server(created_server_id),
@@ -3113,7 +3153,17 @@ def clone_instance(
                 {"error"},
                 timeout=600,
             )
+            _CLONE_LOG.debug("clone step=power_off complete instance_id=%s server_id=%s", instance_id, created_server_id)
 
+        _CLONE_LOG.info(
+            "clone completed instance_id=%s server_id=%s cloned_ports=%s cloned_volumes=%s floating_ip_id=%s warnings=%s",
+            instance_id,
+            created_server_id,
+            created_ports,
+            created_volumes,
+            created_floating_ip_id or "",
+            warnings,
+        )
         return {
             "source_instance_id": instance_id,
             "server_id": created_server_id,
@@ -3129,6 +3179,14 @@ def clone_instance(
             "warnings": warnings,
         }
     except Exception:
+        _CLONE_LOG.exception(
+            "clone failed instance_id=%s requested_name=%s created_server_id=%s created_ports=%s created_volumes=%s",
+            instance_id,
+            requested_name,
+            created_server_id,
+            created_ports,
+            created_volumes,
+        )
         if created_floating_ip_id:
             try:
                 conn.network.delete_ip(created_floating_ip_id, ignore_missing=True)

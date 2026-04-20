@@ -466,6 +466,15 @@ async def api_instance_clone(instance_id: str, request: Request):
     create_floating_ip = bool(payload.get("create_floating_ip", True))
     power_on = bool(payload.get("power_on", True))
     keep_metadata = bool(payload.get("keep_metadata", True))
+    _LOGGER.info(
+        "clone api request instance_id=%s new_name=%s clone_data_volumes=%s create_floating_ip=%s power_on=%s keep_metadata=%s",
+        instance_id,
+        new_name,
+        clone_data_volumes,
+        create_floating_ip,
+        power_on,
+        keep_metadata,
+    )
     loop = asyncio.get_running_loop()
     try:
         data = await loop.run_in_executor(
@@ -481,8 +490,10 @@ async def api_instance_clone(instance_id: str, request: Request):
                 auth=session.server.openstack_auth,
             ),
         )
+        _LOGGER.info("clone api success instance_id=%s server_id=%s", instance_id, (data or {}).get("server_id"))
         return {"result": data, "error": None, "api_issue": None}
     except Exception as exc:
+        _LOGGER.exception("clone api failed instance_id=%s", instance_id)
         return {
             "result": None,
             "error": str(exc),
