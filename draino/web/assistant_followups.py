@@ -14,8 +14,11 @@ from .assistant_cluster_answers import (
 from .assistant_environment_answers import (
     ENVIRONMENT_SUMMARY_INTENTS,
     HYPERVISOR_METRIC_KEY_TO_INTENT,
+    answer_compute_nodes_with_workloads_summary,
     answer_environment_summary,
     answer_hypervisor_metric_top_n,
+    answer_managed_noschedule_summary,
+    answer_node_comparison,
 )
 
 _NUMBER_WORDS = {
@@ -61,12 +64,29 @@ def detect_followup_kind(query: str) -> tuple[str, dict[str, Any]] | None:
     lowered = _normalize_text(query)
     if not lowered:
         return None
+    hot_match = re.search(r"\bwhy is\s+([a-zA-Z0-9._:-]+)\s+hot\??$", lowered)
+    if hot_match:
+        return ("why_hot", {"target": hot_match.group(1)})
     if lowered in {"why", "why?", "how so", "how so?", "why is that", "why is that?"} or lowered.startswith("why "):
         return ("why", {})
     if lowered in {"open the top node", "open top node", "open it", "open that node", "take me there"}:
         return ("open_top", {})
+    if lowered in {"open the next one", "open next one", "open the next node", "open next node"}:
+        return ("open_next", {})
+    compare_top_match = re.search(r"\bcompare top\s+(\d+)\b", lowered)
+    if compare_top_match:
+        return ("compare_top_n", {"limit": max(2, min(int(compare_top_match.group(1)), 10))})
     if lowered in {"compare it to the next one", "compare to the next one", "compare it with the next one", "compare it to the next node"}:
         return ("compare_next", {})
+    if lowered in {"show affected namespaces", "show the affected namespaces", "which namespaces are affected", "what namespaces are affected"}:
+        return ("affected_namespaces", {})
+    compare_named = re.search(r"\bcompare\s+([a-zA-Z0-9._:-]+)\s+(?:and|to|with|vs\.?)\s+([a-zA-Z0-9._:-]+)\b", lowered)
+    if compare_named:
+        return ("compare_named_nodes", {"left": compare_named.group(1), "right": compare_named.group(2)})
+    if lowered in {"show only the managed ones", "show only managed ones", "only show the managed ones", "show the managed ones"}:
+        return ("managed_only", {})
+    if lowered in {"show only compute nodes with workloads", "show only the compute nodes with workloads", "show compute nodes with workloads", "which compute nodes have workloads"}:
+        return ("compute_with_workloads", {})
     if lowered in {"show only the unhealthy ones", "show only unhealthy ones", "only show the unhealthy ones", "show the unhealthy ones"}:
         return ("unhealthy_only", {})
     if lowered in {"what changed", "what changed?", "what changed since then?", "what changed since then"}:
@@ -135,6 +155,17 @@ def _first_action(base_result: dict[str, Any], previous_result: dict[str, Any]) 
     return None
 
 
+def _nth_action(base_result: dict[str, Any], previous_result: dict[str, Any], index: int) -> dict[str, Any] | None:
+    actions: list[dict[str, Any]] = []
+    for source in (base_result, previous_result):
+        for action in list(source.get("actions") or []):
+            if isinstance(action, dict) and action not in actions:
+                actions.append(action)
+    if 0 <= index < len(actions):
+        return actions[index]
+    return None
+
+
 def _problem_assessment(previous_intent: str, base_result: dict[str, Any], previous_result: dict[str, Any]) -> str:
     scope = dict(base_result.get("scope") or previous_result.get("scope") or {})
     if previous_intent == "noschedule_node_summary":
@@ -176,14 +207,55 @@ def _problem_assessment(previous_intent: str, base_result: dict[str, Any], previ
     return "I can only assess that follow-up for grounded environment and cluster summaries right now."
 
 
-def answer_followup_query(query: str, previous_result: dict[str, Any] | None, auth, k8s_auth) -> dict[str, Any] | None:
+def answer_followup_query(
+    query: str,
+    previous_result: dict[str, Any] | None,
+    auth,
+    k8s_auth,
+    parsed_followup: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(previous_result, dict) or not previous_result:
         return None
-    detected = detect_followup_kind(query)
+    detected = None
+    if isinstance(parsed_followup, dict) and parsed_followup:
+        kind = _normalize_text(parsed_followup.get("kind"))
+        if kind:
+            params = {
+                "target": str(parsed_followup.get("target") or "").strip(),
+                "limit": parsed_followup.get("limit"),
+                "direction": str(parsed_followup.get("direction") or "").strip().lower(),
+                "left": str(parsed_followup.get("left") or "").strip(),
+                "right": str(parsed_followup.get("right") or "").strip(),
+            }
+            detected = (kind, params)
+    if not detected:
+        detected = detect_followup_kind(query)
     if not detected:
         return None
     kind, params = detected
     previous_intent = str(previous_result.get("intent") or "").strip()
+
+    if kind == "why_hot":
+        base_result = _followup_base_result(previous_result, auth, k8s_auth)
+        if base_result is None:
+            return None
+        target = str(params.get("target") or "").strip()
+        findings = _extract_finding_blocks(base_result)
+        answer = f"`{target}` looks hot based on the current grounded summary."
+        if findings:
+            answer += f"\n\n{findings[0]}"
+        return {
+            "intent": "followup_why_hot",
+            "answer": answer,
+            "confidence": float(base_result.get("confidence") or previous_result.get("confidence") or 0.75),
+            "entities": list(base_result.get("entities") or previous_result.get("entities") or []),
+            "actions": list(base_result.get("actions") or previous_result.get("actions") or []),
+            "needs_clarification": False,
+            "findings": findings[:1],
+            "answer_source": "local",
+            "mode": "grounded_followup",
+            "provenance": "Grounded follow-up from previous result",
+        }
 
     if kind == "why":
         base_result = _followup_base_result(previous_result, auth, k8s_auth)
@@ -254,6 +326,25 @@ def answer_followup_query(query: str, previous_result: dict[str, Any] | None, au
             "provenance": "Grounded follow-up from previous result",
         }
 
+    if kind == "open_next":
+        base_result = _followup_base_result(previous_result, auth, k8s_auth)
+        action = _nth_action(base_result or {}, previous_result, 1)
+        if not action:
+            return None
+        label = str(action.get("label") or action.get("node") or "the next resource")
+        return {
+            "intent": "followup_open_next",
+            "answer": f"Opening {label}.",
+            "confidence": float((base_result or {}).get("confidence") or previous_result.get("confidence") or 0.8),
+            "entities": list((base_result or {}).get("entities") or previous_result.get("entities") or []),
+            "actions": [action],
+            "needs_clarification": False,
+            "findings": [],
+            "answer_source": "local",
+            "mode": "grounded_followup",
+            "provenance": "Grounded follow-up from previous result",
+        }
+
     if kind == "compare_next":
         base_result = _followup_base_result(previous_result, auth, k8s_auth)
         if base_result is None:
@@ -290,6 +381,99 @@ def answer_followup_query(query: str, previous_result: dict[str, Any] | None, au
                 "provenance": "Grounded follow-up from previous result",
             }
         return None
+
+    if kind == "compare_top_n":
+        base_result = _followup_base_result(previous_result, auth, k8s_auth)
+        if base_result is None:
+            return None
+        limit = int(params.get("limit") or 3)
+        metric_key = _metric_key_from_result(previous_result)
+        if metric_key:
+            ranking = answer_hypervisor_metric_top_n(metric_key, limit, auth, k8s_auth)
+            if ranking:
+                ranking["intent"] = "followup_compare_top_n"
+                ranking["mode"] = "grounded_followup"
+                ranking["provenance"] = "Grounded follow-up from previous result"
+                ranking["answer"] = f"Comparison of top {limit}:\n\n{ranking.get('answer') or ''}".strip()
+                return ranking
+        findings = _extract_finding_blocks(base_result)
+        if findings:
+            selected = _truncate_finding_block(findings[0], limit)
+            return {
+                "intent": "followup_compare_top_n",
+                "answer": f"Comparison of top {limit}:\n\n{selected}".strip(),
+                "confidence": float(base_result.get("confidence") or previous_result.get("confidence") or 0.75),
+                "entities": list(base_result.get("entities") or previous_result.get("entities") or []),
+                "actions": list(base_result.get("actions") or previous_result.get("actions") or []),
+                "needs_clarification": False,
+                "findings": [selected],
+                "answer_source": "local",
+                "mode": "grounded_followup",
+                "provenance": "Grounded follow-up from previous result",
+            }
+        return None
+
+    if kind == "affected_namespaces":
+        base_result = _followup_base_result(previous_result, auth, k8s_auth)
+        scope = dict((base_result or {}).get("scope") or previous_result.get("scope") or {})
+        namespaces = list(scope.get("top_namespace_names") or [])
+        top_node = str(scope.get("top_node") or "").strip()
+        if not namespaces:
+            return {
+                "intent": "followup_affected_namespaces",
+                "answer": "I do not have namespace names available for that grounded summary.",
+                "confidence": float((base_result or {}).get("confidence") or previous_result.get("confidence") or 0.6),
+                "entities": list((base_result or {}).get("entities") or previous_result.get("entities") or []),
+                "actions": list((base_result or {}).get("actions") or previous_result.get("actions") or []),
+                "needs_clarification": False,
+                "findings": [],
+                "answer_source": "local",
+                "mode": "grounded_followup",
+                "provenance": "Grounded follow-up from previous result",
+            }
+        lines = [f"Affected namespaces on `{top_node}`:" if top_node else "Affected namespaces:", ""]
+        lines.extend(f"- `{name}`" for name in namespaces[:10])
+        if len(namespaces) > 10:
+            lines.append(f"- and {len(namespaces) - 10} more")
+        return {
+            "intent": "followup_affected_namespaces",
+            "answer": "\n".join(lines),
+            "confidence": float((base_result or {}).get("confidence") or previous_result.get("confidence") or 0.8),
+            "entities": list((base_result or {}).get("entities") or previous_result.get("entities") or []),
+            "actions": list((base_result or {}).get("actions") or previous_result.get("actions") or []),
+            "needs_clarification": False,
+            "findings": [],
+            "answer_source": "local",
+            "mode": "grounded_followup",
+            "provenance": "Grounded follow-up from previous result",
+        }
+
+    if kind == "compare_named_nodes":
+        left = str(params.get("left") or "").strip()
+        right = str(params.get("right") or "").strip()
+        comparison = answer_node_comparison([left, right], openstack_auth=auth, k8s_auth=k8s_auth)
+        if not comparison:
+            return None
+        comparison["intent"] = "followup_compare_named_nodes"
+        comparison["mode"] = "grounded_followup"
+        comparison["provenance"] = "Grounded follow-up from previous result"
+        return comparison
+
+    if kind == "managed_only":
+        if previous_intent != "noschedule_node_summary":
+            return None
+        managed = answer_managed_noschedule_summary(k8s_auth=k8s_auth)
+        managed["intent"] = "followup_managed_only"
+        managed["mode"] = "grounded_followup"
+        managed["provenance"] = "Grounded follow-up from previous result"
+        return managed
+
+    if kind == "compute_with_workloads":
+        summary = answer_compute_nodes_with_workloads_summary(openstack_auth=auth, k8s_auth=k8s_auth)
+        summary["intent"] = "followup_compute_with_workloads"
+        summary["mode"] = "grounded_followup"
+        summary["provenance"] = "Grounded follow-up from previous result"
+        return summary
 
     if kind == "unhealthy_only":
         base_result = _followup_base_result(previous_result, auth, k8s_auth)

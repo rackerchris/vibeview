@@ -201,6 +201,7 @@ def _collect_k8s_density_facts(k8s_auth=None) -> tuple[list[dict[str, Any]], lis
             "pvc_pod_count": int(item.get("pvc_pod_count") or 0),
             "pvc_claim_count": int(item.get("pvc_claim_count") or 0),
             "namespace_count": int(item.get("namespace_count") or 0),
+            "namespace_names": list(item.get("namespace_names") or []),
             "ready": bool(item.get("ready")),
             "cordoned": bool(item.get("cordoned")),
             "conditions": list(item.get("conditions") or []),
@@ -596,6 +597,177 @@ def answer_missing_node_agent_summary(k8s_auth=None) -> dict[str, Any]:
     }
 
 
+def answer_managed_noschedule_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_taint_facts(k8s_auth=k8s_auth)
+    managed = [fact for fact in facts if fact.get("has_managed_no_schedule")]
+    answer_lines = [f"Kubernetes nodes with VibeView-managed `NoSchedule` taints: {len(managed)}"]
+    if managed:
+        answer_lines.extend(["", *[f"- `{fact['name']}`" for fact in managed[:12]]])
+        if len(managed) > 12:
+            answer_lines.append(f"- and {len(managed) - 12} more")
+    findings: list[str] = []
+    if managed:
+        findings.append(
+            "VibeView-managed NoSchedule nodes\n"
+            + "\n".join(
+                f"- {fact['name']} ({', '.join(_k8s_resource_summary_bits(fact)) or 'no active workload context'})"
+                for fact in managed[:10]
+            )
+        )
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "managed_noschedule_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.91 if not errors else 0.68,
+        "entities": [{"kind": "environment", "id": "managed_noschedule", "label": "managed NoSchedule taints"}],
+        "actions": _node_actions([fact["name"] for fact in managed], limit=3),
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {
+            "managed_noschedule_count": len(managed),
+            "node_total": len(facts),
+        },
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node taints",
+    }
+
+
+def answer_compute_nodes_with_workloads_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_compute_facts(openstack_auth=openstack_auth, k8s_auth=k8s_auth, include_signals=False)
+    active = [fact for fact in facts if int(fact.get("vm_count") or 0) > 0]
+    active.sort(key=lambda fact: (-int(fact.get("vm_count") or 0), str(fact.get("name") or "")))
+    answer_lines = [f"Compute nodes currently hosting running VMs: {len(active)}"]
+    if active:
+        answer_lines.extend(["", *[f"- `{fact['name']}` ({int(fact.get('vm_count') or 0)} VMs)" for fact in active[:12]]])
+        if len(active) > 12:
+            answer_lines.append(f"- and {len(active) - 12} more")
+    findings: list[str] = []
+    if active:
+        findings.append(
+            "Compute nodes with active VM workloads\n"
+            + "\n".join(f"- {fact['name']} ({int(fact.get('vm_count') or 0)} VMs)" for fact in active[:10])
+        )
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "compute_nodes_with_workloads_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.9 if not errors else 0.68,
+        "entities": [{"kind": "environment", "id": "compute_nodes_with_workloads", "label": "compute nodes with workloads"}],
+        "actions": _node_actions([fact["name"] for fact in active], limit=3),
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {
+            "active_compute_count": len(active),
+            "compute_total": len(facts),
+        },
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes and OpenStack compute data",
+    }
+
+
+def answer_node_comparison(node_names: list[str] | tuple[str, ...], openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
+    requested = [str(name or "").strip() for name in list(node_names or []) if str(name or "").strip()]
+    deduped: list[str] = []
+    for name in requested:
+        if name not in deduped:
+            deduped.append(name)
+    if len(deduped) < 2:
+        return {
+            "intent": "node_comparison",
+            "answer": "I need two node names to compare.",
+            "confidence": 0.2,
+            "entities": [],
+            "actions": [],
+            "needs_clarification": True,
+            "answer_source": "local",
+            "mode": "grounded_followup",
+            "provenance": "Grounded live node comparison",
+        }
+    node_facts = {str(node.get("name") or ""): node for node in list(k8s_ops.get_nodes(auth=k8s_auth) or [])}
+    density_facts, density_errors = _collect_k8s_density_facts(k8s_auth=k8s_auth)
+    density_map = {str(item.get("name") or ""): item for item in density_facts}
+    compute_facts, compute_errors = _collect_node_attention_facts(openstack_auth=openstack_auth, k8s_auth=k8s_auth)
+    compute_map = {str(item.get("name") or ""): item for item in compute_facts}
+    selected: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for name in deduped[:2]:
+        aliases = _host_aliases(name)
+        matched_name = next((candidate for candidate in node_facts if candidate in aliases or candidate.lower() in aliases), "")
+        if not matched_name:
+            matched_name = next((candidate for candidate in density_map if candidate in aliases or candidate.lower() in aliases), "")
+        if not matched_name:
+            matched_name = next((candidate for candidate in compute_map if candidate in aliases or candidate.lower() in aliases), "")
+        if not matched_name:
+            missing.append(name)
+            continue
+        selected.append({
+            "name": matched_name,
+            "node": node_facts.get(matched_name, {}),
+            "density": density_map.get(matched_name, {}),
+            "compute": compute_map.get(matched_name, {}),
+        })
+    if len(selected) < 2:
+        missing_text = ", ".join(f"`{name}`" for name in (missing or deduped))
+        return {
+            "intent": "node_comparison",
+            "answer": f"I could not compare those nodes because I could not resolve both names from the current environment: {missing_text}.",
+            "confidence": 0.35,
+            "entities": [{"kind": "environment", "id": "node_comparison", "label": "node comparison"}],
+            "actions": _node_actions([item["name"] for item in selected], limit=2),
+            "needs_clarification": True,
+            "answer_source": "local",
+            "mode": "grounded_followup",
+            "provenance": "Grounded live node comparison",
+        }
+    lines = ["Node comparison", ""]
+    findings: list[str] = []
+    for item in selected:
+        name = item["name"]
+        node = item["node"]
+        density = item["density"]
+        compute = item["compute"]
+        ready = "Ready" if density.get("ready", node.get("ready", True)) else "NotReady"
+        cordoned = "cordoned" if density.get("cordoned", node.get("cordoned", False)) else "schedulable"
+        pod_count = int(density.get("pod_count") or 0)
+        namespace_count = int(density.get("namespace_count") or 0)
+        pvc_pod_count = int(density.get("pvc_pod_count") or 0)
+        vm_count = int(compute.get("vm_count") or 0)
+        reboot_required = bool(compute.get("reboot_required"))
+        node_agent_ready = compute.get("node_agent_ready")
+        agent_text = "node agent ready" if node_agent_ready else "node agent missing"
+        kernel = str(compute.get("kernel_version") or node.get("kernel_version") or "").strip()
+        lines.extend([
+            f"`{name}`",
+            f"- Health: {ready}, {cordoned}",
+            f"- Workloads: `{vm_count}` VMs, `{pod_count}` pods, `{namespace_count}` namespaces, `{pvc_pod_count}` PVC-backed pods",
+            f"- Host state: {agent_text}{', reboot required' if reboot_required else ''}{f', kernel `{kernel}`' if kernel else ''}",
+            "",
+        ])
+        findings.append(
+            f"{name}\n- Health: {ready}, {cordoned}\n- Workloads: {vm_count} VMs, {pod_count} pods, {namespace_count} namespaces, {pvc_pod_count} PVC-backed pods\n- Host state: {agent_text}{', reboot required' if reboot_required else ''}"
+        )
+    errors = [error for error in [*density_errors, *compute_errors] if error]
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "node_comparison",
+        "answer": "\n".join(lines).strip(),
+        "confidence": 0.84 if not errors else 0.64,
+        "entities": [{"kind": "environment", "id": "node_comparison", "label": "node comparison"}],
+        "actions": _node_actions([item["name"] for item in selected], limit=2),
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"compared_nodes": [item["name"] for item in selected]},
+        "answer_source": "local",
+        "mode": "grounded_followup",
+        "provenance": "Grounded live node comparison",
+    }
+
+
 def answer_reboot_needed_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
     facts, errors = _collect_compute_facts(openstack_auth=openstack_auth, k8s_auth=k8s_auth, include_signals=True)
     reboot_nodes = sorted(fact["name"] for fact in facts if fact["reboot_required"])
@@ -976,7 +1148,7 @@ def answer_pod_density_summary(k8s_auth=None) -> dict[str, Any]:
         "actions": _node_actions([fact["name"] for fact in ranked], limit=3),
         "needs_clarification": False,
         "findings": findings,
-        "scope": {"top_node": top["name"], "top_pods_pct": top.get("pods_pct"), "top_pod_count": top["pod_count"]},
+        "scope": {"top_node": top["name"], "top_pods_pct": top.get("pods_pct"), "top_pod_count": top["pod_count"], "top_namespace_names": list(top.get("namespace_names") or [])},
         "answer_source": "local",
         "mode": "grounded_environment_summary",
         "provenance": "Grounded Kubernetes node density data",
@@ -1024,7 +1196,7 @@ def answer_pvc_hotspot_summary(k8s_auth=None) -> dict[str, Any]:
         "actions": _node_actions([fact["name"] for fact in ranked], limit=3),
         "needs_clarification": False,
         "findings": findings,
-        "scope": {"top_node": top["name"], "top_pvc_pod_count": top["pvc_pod_count"], "top_pvc_claim_count": top["pvc_claim_count"]},
+        "scope": {"top_node": top["name"], "top_pvc_pod_count": top["pvc_pod_count"], "top_pvc_claim_count": top["pvc_claim_count"], "top_namespace_names": list(top.get("namespace_names") or [])},
         "answer_source": "local",
         "mode": "grounded_environment_summary",
         "provenance": "Grounded Kubernetes node density data",
@@ -1073,7 +1245,7 @@ def answer_cpu_request_load_summary(k8s_auth=None) -> dict[str, Any]:
         "actions": _node_actions([fact["name"] for fact in ranked], limit=3),
         "needs_clarification": False,
         "findings": findings,
-        "scope": {"top_node": top["name"], "top_cpu_req_pct": top["cpu_req_pct"], "top_cpu_requests_mcpu": top["cpu_requests_mcpu"]},
+        "scope": {"top_node": top["name"], "top_cpu_req_pct": top["cpu_req_pct"], "top_cpu_requests_mcpu": top["cpu_requests_mcpu"], "top_namespace_names": list(top.get("namespace_names") or [])},
         "answer_source": "local",
         "mode": "grounded_environment_summary",
         "provenance": "Grounded Kubernetes node density data",
@@ -1122,7 +1294,7 @@ def answer_memory_request_load_summary(k8s_auth=None) -> dict[str, Any]:
         "actions": _node_actions([fact["name"] for fact in ranked], limit=3),
         "needs_clarification": False,
         "findings": findings,
-        "scope": {"top_node": top["name"], "top_memory_req_pct": top["memory_req_pct"], "top_memory_requests_mib": top["memory_requests_mib"]},
+        "scope": {"top_node": top["name"], "top_memory_req_pct": top["memory_req_pct"], "top_memory_requests_mib": top["memory_requests_mib"], "top_namespace_names": list(top.get("namespace_names") or [])},
         "answer_source": "local",
         "mode": "grounded_environment_summary",
         "provenance": "Grounded Kubernetes node density data",
@@ -1170,7 +1342,7 @@ def answer_namespace_spread_summary(k8s_auth=None) -> dict[str, Any]:
         "actions": _node_actions([fact["name"] for fact in ranked], limit=3),
         "needs_clarification": False,
         "findings": findings,
-        "scope": {"top_node": top["name"], "top_namespace_count": top["namespace_count"], "top_pod_count": top["pod_count"]},
+        "scope": {"top_node": top["name"], "top_namespace_count": top["namespace_count"], "top_pod_count": top["pod_count"], "top_namespace_names": list(top.get("namespace_names") or [])},
         "answer_source": "local",
         "mode": "grounded_environment_summary",
         "provenance": "Grounded Kubernetes node density data",

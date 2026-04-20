@@ -467,6 +467,46 @@ def _safe_json_parse(text: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _provider_json_completion(system_prompt: str, user_payload: dict[str, Any], timeout_seconds: float | None = None) -> dict[str, Any]:
+    if not assistant_provider_enabled():
+        return {}
+    try:
+        from openai import OpenAI
+    except Exception:
+        return {}
+    timeout_seconds = float(timeout_seconds if timeout_seconds is not None else min(_ASSISTANT_TIMEOUT_SECONDS, _ASSISTANT_PARSE_TIMEOUT_SECONDS))
+    client = OpenAI(
+        base_url=_ASSISTANT_BASE_URL,
+        api_key=_ASSISTANT_API_KEY,
+        timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds), read=timeout_seconds, write=min(3.0, timeout_seconds)),
+        max_retries=0,
+        http_client=httpx.Client(
+            timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds), read=timeout_seconds, write=min(3.0, timeout_seconds)),
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+        ),
+    )
+    try:
+        response = client.chat.completions.create(
+            model=_ASSISTANT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload)},
+            ],
+            temperature=0,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return _safe_json_parse(str(content or ""))
+    except Exception:
+        return {}
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
 def _safe_confidence(value: Any, default: float) -> float:
     if isinstance(value, (int, float)):
         return max(0.0, min(1.0, float(value)))
@@ -1109,32 +1149,16 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
 
 def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str, Any]:
     fallback = _parse_query_fallback(query)
-    if not fallback.get("needs_clarification") and str(fallback.get("intent") or "").strip().lower() != "unknown":
-        fallback["parser_source"] = "fallback"
-        return fallback
     if _looks_like_environment_summary_query(query):
         parsed = _parse_environment_query_with_provider(query, fallback)
         if parsed:
             return parsed
+    if not fallback.get("needs_clarification") and str(fallback.get("intent") or "").strip().lower() != "unknown":
+        fallback["parser_source"] = "fallback"
+        return fallback
     if not assistant_provider_enabled():
         fallback["parser_source"] = "fallback"
         return fallback
-    try:
-        from openai import OpenAI
-    except Exception:
-        fallback["parser_source"] = "fallback"
-        return fallback
-    timeout_seconds = min(_ASSISTANT_TIMEOUT_SECONDS, _ASSISTANT_PARSE_TIMEOUT_SECONDS)
-    client = OpenAI(
-        base_url=_ASSISTANT_BASE_URL,
-        api_key=_ASSISTANT_API_KEY,
-        timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds), read=timeout_seconds, write=min(3.0, timeout_seconds)),
-        max_retries=0,
-        http_client=httpx.Client(
-            timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds), read=timeout_seconds, write=min(3.0, timeout_seconds)),
-            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
-        ),
-    )
     system_prompt = (
         "You classify ops questions into JSON only. "
         "Allowed intents: quota_usage, quota_limit, resource_count, instance_status, instance_location, "
@@ -1150,7 +1174,7 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
         "resource_name should be a VM name, security group name, resource name, or metric keyword such as floating_ips, cores, networks, routers, ports, instances. "
         "Never include markdown."
     )
-    user_prompt = json.dumps({
+    parsed = _provider_json_completion(system_prompt, {
         "query": query,
         "context": {
             "selected_project_id": context.get("selected_project_id", ""),
@@ -1158,32 +1182,11 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
             "active_view": context.get("active_view", ""),
         },
     })
-    try:
-        response = client.chat.completions.create(
-            model=_ASSISTANT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0,
-        )
-        content = response.choices[0].message.content if response.choices else ""
-        parsed = _safe_json_parse(str(content or ""))
-        if not parsed:
-            fallback["parser_source"] = "fallback"
-            return fallback
-        parsed["parser_source"] = "xerotier"
-        return parsed
-    except Exception:
+    if not parsed:
         fallback["parser_source"] = "fallback"
         return fallback
-    finally:
-        close = getattr(client, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception:
-                pass
+    parsed["parser_source"] = "xerotier"
+    return parsed
 
 
 def _parse_environment_query_with_provider(query: str, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1191,22 +1194,6 @@ def _parse_environment_query_with_provider(query: str, fallback: dict[str, Any] 
     if not assistant_provider_enabled():
         fallback["parser_source"] = "fallback"
         return fallback
-    try:
-        from openai import OpenAI
-    except Exception:
-        fallback["parser_source"] = "fallback"
-        return fallback
-    timeout_seconds = min(_ASSISTANT_TIMEOUT_SECONDS, _ASSISTANT_PARSE_TIMEOUT_SECONDS)
-    client = OpenAI(
-        base_url=_ASSISTANT_BASE_URL,
-        api_key=_ASSISTANT_API_KEY,
-        timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds), read=timeout_seconds, write=min(3.0, timeout_seconds)),
-        max_retries=0,
-        http_client=httpx.Client(
-            timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds), read=timeout_seconds, write=min(3.0, timeout_seconds)),
-            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
-        ),
-    )
     system_prompt = (
         "Classify environment and fleet questions into JSON only. "
         "Allowed intents: kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, container_runtime_drift_summary, missing_node_agent_summary, reboot_needed_summary, "
@@ -1217,36 +1204,81 @@ def _parse_environment_query_with_provider(query: str, fallback: dict[str, Any] 
         "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, kernel_drift, kubelet_drift, container_runtime_drift, node_agent, reboot, node_attention, os_image_drift, control_plane_runtime, pod_density, pvc_hotspot, cpu_request_load, memory_request_load, namespace_spread, not_ready_nodes, cordoned_nodes, noschedule_nodes, compute_empty, hypervisor_load, hypervisor_empty, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
         "Never include markdown."
     )
-    user_prompt = json.dumps({"query": query})
-    try:
-        response = client.chat.completions.create(
-            model=_ASSISTANT_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0,
-        )
-        content = response.choices[0].message.content if response.choices else ""
-        parsed = _safe_json_parse(str(content or ""))
-        intent = str(parsed.get("intent") or "").strip().lower()
-        if intent not in _ENVIRONMENT_SUMMARY_INTENTS:
-            fallback["parser_source"] = "fallback"
-            return fallback
-        parsed["parser_source"] = "xerotier"
-        parsed.setdefault("resource_kind", "environment")
-        parsed.setdefault("needs_clarification", False)
-        return parsed
-    except Exception:
+    parsed = _provider_json_completion(system_prompt, {"query": query})
+    intent = str(parsed.get("intent") or "").strip().lower()
+    if intent not in _ENVIRONMENT_SUMMARY_INTENTS:
         fallback["parser_source"] = "fallback"
         return fallback
-    finally:
-        close = getattr(client, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception:
-                pass
+    parsed["parser_source"] = "xerotier"
+    parsed.setdefault("resource_kind", "environment")
+    parsed.setdefault("needs_clarification", False)
+    return parsed
+
+
+def _parse_followup_with_provider(query: str, previous_result: dict[str, Any]) -> dict[str, Any]:
+    if not assistant_provider_enabled():
+        return {}
+    previous_intent = str(previous_result.get("intent") or "").strip()
+    previous_mode = str(previous_result.get("mode") or "").strip()
+    previous_scope = previous_result.get("scope") or {}
+    previous_findings = list(previous_result.get("findings") or [])
+    previous_actions = list(previous_result.get("actions") or [])
+    system_prompt = (
+        "Classify assistant follow-up questions into JSON only. "
+        "Allowed kinds: why, why_hot, top_n, open_top, open_next, compare_next, compare_top_n, compare_named_nodes, affected_namespaces, managed_only, compute_with_workloads, unhealthy_only, changed, problem, unknown. "
+        "Return keys: kind, target, limit, direction, left, right. "
+        "Use why_hot for targeted hotspot questions such as asking why a specific node is hot. "
+        "Use compare_top_n for freer comparative wording such as side-by-side or compare the first few. "
+        "Use compare_named_nodes when the user names two nodes or hosts to compare directly. "
+        "Use managed_only when the user asks to show only managed items from a previous NoSchedule-style result. "
+        "Use compute_with_workloads when the user asks to filter down to compute nodes actively hosting workloads. "
+        "Use open_next when the user asks to open the second or next result. "
+        "Use affected_namespaces when the user asks which namespaces dominate or are affected on the prior result. "
+        "Never include markdown."
+    )
+    parsed = _provider_json_completion(system_prompt, {
+        "query": query,
+        "previous_result": {
+            "intent": previous_intent,
+            "mode": previous_mode,
+            "scope": previous_scope,
+            "findings": previous_findings[:3],
+            "actions": previous_actions[:3],
+        },
+    })
+    kind = str(parsed.get("kind") or "").strip().lower()
+    if kind not in {
+        "why",
+        "why_hot",
+        "top_n",
+        "open_top",
+        "open_next",
+        "compare_next",
+        "compare_top_n",
+        "compare_named_nodes",
+        "affected_namespaces",
+        "managed_only",
+        "compute_with_workloads",
+        "unhealthy_only",
+        "changed",
+        "problem",
+    }:
+        return {}
+    normalized = {
+        "kind": kind,
+        "target": str(parsed.get("target") or "").strip(),
+        "direction": str(parsed.get("direction") or "").strip().lower(),
+        "left": str(parsed.get("left") or "").strip(),
+        "right": str(parsed.get("right") or "").strip(),
+    }
+    try:
+        limit = int(parsed.get("limit") or 0) if str(parsed.get("limit") or "").strip() else 0
+    except Exception:
+        limit = 0
+    if limit:
+        normalized["limit"] = max(1, min(limit, 10))
+    normalized["parser_source"] = "xerotier"
+    return normalized
 
 
 def _resolve_instance(query: str, auth, k8s_auth=None, project_id: str = "") -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -1848,14 +1880,20 @@ def answer_assistant_query(
             "needs_clarification": True,
             "timings": {"parse_ms": 0.0, "answer_ms": 0.0, "total_ms": 0.0},
         }
-    followup_started = time.perf_counter()
-    followup = answer_followup_query(text, previous_result, auth, k8s_auth)
+    followup_parse_ms = 0.0
+    parsed_followup: dict[str, Any] | None = None
+    if isinstance(previous_result, dict) and previous_result and assistant_provider_enabled():
+        followup_parse_started = time.perf_counter()
+        parsed_followup = _parse_followup_with_provider(text, previous_result) or None
+        followup_parse_ms = round((time.perf_counter() - followup_parse_started) * 1000, 1) if parsed_followup else 0.0
+    followup_answer_started = time.perf_counter()
+    followup = answer_followup_query(text, previous_result, auth, k8s_auth, parsed_followup=parsed_followup)
     if followup is not None:
-        followup["parser_source"] = "followup"
+        followup["parser_source"] = str((parsed_followup or {}).get("parser_source") or "followup")
         followup["provider_enabled"] = assistant_provider_enabled()
         followup["timings"] = {
-            "parse_ms": 0.0,
-            "answer_ms": round((time.perf_counter() - followup_started) * 1000, 1),
+            "parse_ms": followup_parse_ms,
+            "answer_ms": round((time.perf_counter() - followup_answer_started) * 1000, 1),
             "total_ms": round((time.perf_counter() - started) * 1000, 1),
         }
         return followup

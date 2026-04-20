@@ -2033,7 +2033,7 @@ def test_assistant_service_answers_pod_density_summary(monkeypatch):
         lambda auth=None: {
             "nodes": [
                 {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "pvc_pod_count": 8, "pvc_claim_count": 10, "namespace_count": 12, "ready": True},
-                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "pvc_pod_count": 4, "pvc_claim_count": 5, "namespace_count": 10, "ready": True},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "pvc_pod_count": 4, "pvc_claim_count": 5, "namespace_count": 10, "namespace_names": ["api", "ingress", "metrics"], "ready": True},
                 {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "pvc_pod_count": 14, "pvc_claim_count": 18, "namespace_count": 7, "ready": True},
             ],
             "error": None,
@@ -2150,7 +2150,7 @@ def test_assistant_service_answers_memory_request_load_summary(monkeypatch):
         lambda auth=None: {
             "nodes": [
                 {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "memory_requests_mib": 131072, "memory_allocatable_mib": 262144, "namespace_count": 12, "ready": True},
-                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "memory_requests_mib": 245760, "memory_allocatable_mib": 262144, "namespace_count": 10, "ready": True},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "memory_requests_mib": 245760, "memory_allocatable_mib": 262144, "namespace_count": 10, "namespace_names": ["api", "ingress", "metrics"], "ready": True},
                 {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "memory_requests_mib": 65536, "memory_allocatable_mib": 262144, "namespace_count": 7, "ready": True},
             ],
             "error": None,
@@ -2301,6 +2301,84 @@ def test_assistant_service_answers_followup_why(monkeypatch):
     assert result["actions"][0]["node"] == "cmp-2"
 
 
+def test_parse_query_with_provider_prefers_provider_for_environment_queries(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "assistant_provider_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_fallback",
+        lambda query: {
+            "intent": "reboot_needed_summary",
+            "resource_kind": "environment",
+            "resource_name": "reboot",
+            "needs_clarification": False,
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_environment_query_with_provider",
+        lambda query, fallback=None: {
+            "intent": "reboot_needed_summary",
+            "resource_kind": "environment",
+            "resource_name": "reboot",
+            "needs_clarification": False,
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_looks_like_environment_summary_query",
+        lambda query: True,
+    )
+
+    result = assistant_service._parse_query_with_provider(
+        "which nodes should be rebooted first?",
+        {"selected_project_id": "", "selected_project_name": "", "active_view": "infrastructure"},
+    )
+
+    assert result["intent"] == "reboot_needed_summary"
+    assert result["parser_source"] == "xerotier"
+
+
+def test_assistant_service_answers_followup_why_hot(monkeypatch):
+    monkeypatch.setattr(
+        assistant_followups,
+        "answer_environment_summary",
+        lambda intent, auth=None, k8s_auth=None: {
+            "intent": "memory_request_load_summary",
+            "answer": "The Kubernetes node with the highest memory request load is `cmp-2` at `93.8%`.",
+            "confidence": 0.86,
+            "entities": [{"kind": "environment", "id": "memory_request_load", "label": "memory request load"}],
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+            "needs_clarification": False,
+            "findings": ["Top nodes by memory request load\n- cmp-2 (93.8%, 245760 MiB)\n- cmp-1 (50.0%, 131072 MiB)"],
+            "scope": {"top_node": "cmp-2", "top_memory_req_pct": 93.8},
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        },
+    )
+    result = assistant_service.answer_assistant_query(
+        "why is cmp-2 hot?",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "memory_request_load_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_node": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_why_hot"
+    assert result["parser_source"] == "followup"
+    assert "`cmp-2` looks hot" in result["answer"]
+    assert "Top nodes by memory request load" in result["answer"]
+
+
 def test_assistant_service_answers_followup_show_top_n(monkeypatch):
     monkeypatch.setattr(
         assistant_service,
@@ -2343,6 +2421,49 @@ def test_assistant_service_answers_followup_show_top_n(monkeypatch):
     assert "Top 2 hypervisors by RAM usage" in result["answer"]
     assert "- `cmp-2`: `96.0 GiB`" in result["answer"]
     assert "- `cmp-1`: `64.0 GiB`" in result["answer"]
+
+
+def test_assistant_service_answers_followup_compare_top_n(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for grounded follow-up questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"memory_mb_used": 65536, "memory_mb": 131072, "running_vms": 11},
+            "cmp-2": {"memory_mb_used": 98304, "memory_mb": 131072, "running_vms": 9},
+            "cmp-3": {"memory_mb_used": 49152, "memory_mb": 131072, "running_vms": 6},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "compare top 3",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "highest_ram_hypervisor_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_hypervisor": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_compare_top_n"
+    assert result["parser_source"] == "followup"
+    assert "Comparison of top 3:" in result["answer"]
+    assert "Top 3 hypervisors by RAM usage" in result["answer"]
 
 
 def test_assistant_service_answers_followup_problem(monkeypatch):
@@ -2398,6 +2519,102 @@ def test_assistant_service_answers_followup_open_top(monkeypatch):
     assert result["parser_source"] == "followup"
     assert "Opening Open cmp-2." in result["answer"]
     assert result["actions"][0]["node"] == "cmp-2"
+
+
+def test_assistant_service_answers_followup_open_next(monkeypatch):
+    monkeypatch.setattr(
+        assistant_followups,
+        "answer_environment_summary",
+        lambda intent, auth=None, k8s_auth=None: {
+            "intent": "memory_request_load_summary",
+            "answer": "The Kubernetes node with the highest memory request load is `cmp-2`.",
+            "confidence": 0.86,
+            "entities": [{"kind": "environment", "id": "memory_request_load", "label": "memory request load"}],
+            "actions": [
+                {"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"},
+                {"type": "open_node", "node": "cmp-1", "label": "Open cmp-1"},
+            ],
+            "needs_clarification": False,
+            "findings": [],
+            "scope": {"top_node": "cmp-2"},
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        },
+    )
+    result = assistant_service.answer_assistant_query(
+        "open the next one",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "memory_request_load_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_node": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_open_next"
+    assert result["parser_source"] == "followup"
+    assert "Opening Open cmp-1." in result["answer"]
+    assert result["actions"][0]["node"] == "cmp-1"
+
+
+def test_assistant_service_answers_provider_driven_followup_compare_top_n(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "assistant_provider_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_followup_with_provider",
+        lambda query, previous_result: {
+            "kind": "compare_top_n",
+            "limit": 3,
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for provider-driven grounded follow-up questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"memory_mb_used": 65536, "memory_mb": 131072, "running_vms": 11},
+            "cmp-2": {"memory_mb_used": 98304, "memory_mb": 131072, "running_vms": 9},
+            "cmp-3": {"memory_mb_used": 49152, "memory_mb": 131072, "running_vms": 6},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "show me the top three side by side",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "highest_ram_hypervisor_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_hypervisor": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_compare_top_n"
+    assert result["parser_source"] == "xerotier"
+    assert "Comparison of top 3:" in result["answer"]
+    assert "Top 3 hypervisors by RAM usage" in result["answer"]
 
 
 def test_assistant_service_answers_followup_compare_next(monkeypatch):
@@ -2477,6 +2694,212 @@ def test_assistant_service_answers_followup_unhealthy_only(monkeypatch):
     assert result["parser_source"] == "followup"
     assert "Only the unhealthy or flagged resources:" in result["answer"]
     assert "NotReady nodes" in result["answer"]
+
+
+def test_assistant_service_answers_followup_affected_namespaces(monkeypatch):
+    monkeypatch.setattr(
+        assistant_followups,
+        "answer_environment_summary",
+        lambda intent, auth=None, k8s_auth=None: {
+            "intent": "memory_request_load_summary",
+            "answer": "The Kubernetes node with the highest memory request load is `cmp-2`.",
+            "confidence": 0.86,
+            "entities": [{"kind": "environment", "id": "memory_request_load", "label": "memory request load"}],
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+            "needs_clarification": False,
+            "findings": [],
+            "scope": {"top_node": "cmp-2", "top_namespace_names": ["api", "ingress", "metrics"]},
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        },
+    )
+    result = assistant_service.answer_assistant_query(
+        "show affected namespaces",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "memory_request_load_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_node": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_affected_namespaces"
+    assert result["parser_source"] == "followup"
+    assert "Affected namespaces on `cmp-2`:" in result["answer"]
+    assert "- `api`" in result["answer"]
+
+
+def test_assistant_service_answers_provider_driven_followup_compare_named_nodes(monkeypatch):
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_followup_with_provider",
+        lambda query, previous_result: {
+            "kind": "compare_named_nodes",
+            "left": "cmp-1",
+            "right": "cmp-2",
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 80, "pods_allocatable": 200, "namespace_count": 5, "namespace_names": ["api", "metrics"], "pvc_pod_count": 2, "ready": True, "cordoned": False, "conditions": []},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 180, "namespace_count": 9, "namespace_names": ["api", "ingress", "mq"], "pvc_pod_count": 7, "ready": False, "cordoned": True, "conditions": ["MemoryPressure"]},
+            ],
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 4, "compute_status": "up"},
+            "cmp-2": {"vm_count": 9, "compute_status": "up"},
+        },
+    )
+    monkeypatch.setattr(assistant_environment_answers.node_agent_client, "get_ready_node_names", lambda: ["cmp-1"])
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_node_host_signals",
+        lambda node_name, hostname=None: {
+            "kernel_version": "5.14.0-500" if node_name == "cmp-1" else "5.14.0-510",
+            "latest_kernel_version": "5.14.0-510",
+            "reboot_required": node_name == "cmp-2",
+        },
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "show me cmp-1 and cmp-2 side by side",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "memory_request_load_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_node": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_compare_named_nodes"
+    assert result["parser_source"] == "xerotier"
+    assert "Node comparison" in result["answer"]
+    assert "`cmp-1`" in result["answer"]
+    assert "`cmp-2`" in result["answer"]
+
+
+def test_assistant_service_answers_provider_driven_followup_managed_only(monkeypatch):
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_followup_with_provider",
+        lambda query, previous_result: {
+            "kind": "managed_only",
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "taints": [{"key": "vibeview", "value": "managed", "effect": "NoSchedule"}]},
+            {"name": "cmp-2", "hostname": "cmp-2", "taints": [{"key": "custom", "value": "true", "effect": "NoSchedule"}]},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 10, "pods_allocatable": 100, "namespace_count": 2, "namespace_names": ["api"], "pvc_pod_count": 1, "ready": True, "cordoned": False, "conditions": []},
+                {"node": "cmp-2", "pod_count": 0, "pods_allocatable": 100, "namespace_count": 0, "namespace_names": [], "pvc_pod_count": 0, "ready": True, "cordoned": False, "conditions": []},
+            ],
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "has_managed_noschedule_taint",
+        lambda taints: any(str(t.get("key")) == "vibeview" for t in taints),
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "just show the managed ones",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "noschedule_node_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"noschedule_count": 2},
+            "actions": [{"type": "open_node", "node": "cmp-1", "label": "Open cmp-1"}],
+        },
+    )
+
+    assert result["intent"] == "followup_managed_only"
+    assert result["parser_source"] == "xerotier"
+    assert "VibeView-managed `NoSchedule`" in result["answer"]
+    assert "`cmp-1`" in result["answer"]
+
+
+def test_assistant_service_answers_provider_driven_followup_compute_with_workloads(monkeypatch):
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_followup_with_provider",
+        lambda query, previous_result: {
+            "kind": "compute_with_workloads",
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 0, "compute_status": "up"},
+            "cmp-2": {"vm_count": 5, "compute_status": "up"},
+            "cmp-3": {"vm_count": 2, "compute_status": "up"},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "show only compute nodes with workloads",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "busiest_hypervisor_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_hypervisor": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_compute_with_workloads"
+    assert result["parser_source"] == "xerotier"
+    assert "Compute nodes currently hosting running VMs: 2" in result["answer"]
+    assert "`cmp-2` (5 VMs)" in result["answer"]
+    assert "`cmp-3` (2 VMs)" in result["answer"]
 
 
 def test_assistant_service_answers_followup_changed(monkeypatch):
