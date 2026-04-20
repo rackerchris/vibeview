@@ -1877,6 +1877,203 @@ def test_assistant_service_answers_top_n_busiest_hypervisors(monkeypatch):
     assert result["answer_source"] == "local"
 
 
+def test_assistant_service_answers_kernel_drift_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for kernel drift questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "kernel_version": "5.14.0-500"},
+            {"name": "cmp-2", "hostname": "cmp-2", "kernel_version": "5.14.0-510"},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_node_host_signals",
+        lambda node_name, hostname=None: {
+            "kernel_version": "5.14.0-500" if node_name == "cmp-1" else "5.14.0-510",
+            "latest_kernel_version": "5.14.0-510",
+            "reboot_required": node_name == "cmp-1",
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes are behind on kernel updates?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "kernel_drift_summary"
+    assert "Nodes behind the latest observed kernel: 1" in result["answer"]
+    assert "`cmp-1`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_kubelet_drift_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for kubelet drift questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "kubelet_version": "v1.30.1"},
+            {"name": "cmp-2", "hostname": "cmp-2", "kubelet_version": "v1.30.3"},
+            {"name": "cmp-3", "hostname": "cmp-3", "kubelet_version": "v1.30.3"},
+        ],
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes are behind on kubelet versions?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "kubelet_drift_summary"
+    assert "Nodes behind the latest observed kubelet version: 1" in result["answer"]
+    assert "`cmp-1`" in result["answer"]
+    assert "`v1.30.1`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_os_image_drift_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for os image drift questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "os_image": "Ubuntu 22.04.4 LTS"},
+            {"name": "cmp-2", "hostname": "cmp-2", "os_image": "Ubuntu 22.04.4 LTS"},
+            {"name": "cmp-3", "hostname": "cmp-3", "os_image": "Ubuntu 24.04 LTS"},
+        ],
+    )
+
+    result = assistant_service.answer_assistant_query("do we have os image drift across the kubernetes nodes?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "os_image_drift_summary"
+    assert "Nodes on a non-majority OS image: 1" in result["answer"]
+    assert "`cmp-3`" in result["answer"]
+    assert "Ubuntu 24.04 LTS" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_node_attention_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for node attention questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True, "kernel_version": "5.14.0-500"},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True, "kernel_version": "5.14.0-510"},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 11, "compute_status": "up"},
+            "cmp-2": {"vm_count": 2, "compute_status": "up"},
+        },
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.node_agent_client,
+        "get_ready_node_names",
+        lambda: ["cmp-2"],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_node_host_signals",
+        lambda node_name, hostname=None: {
+            "kernel_version": "5.14.0-500" if node_name == "cmp-1" else "5.14.0-510",
+            "latest_kernel_version": "5.14.0-510",
+            "reboot_required": node_name == "cmp-1",
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes need the most attention?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "node_attention_summary"
+    assert "Nodes needing the most attention: 1" in result["answer"]
+    assert "`cmp-1`" in result["answer"]
+    assert "reboot required" in result["answer"]
+    assert "node agent missing" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_top_n_hypervisors_by_ram(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for top-n RAM hypervisor summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"memory_mb_used": 65536, "memory_mb": 131072, "running_vms": 11},
+            "cmp-2": {"memory_mb_used": 98304, "memory_mb": 131072, "running_vms": 9},
+            "cmp-3": {"memory_mb_used": 49152, "memory_mb": 131072, "running_vms": 6},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query("top 2 hypervisors by ram usage", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "hypervisor_metric_top_n"
+    assert "Top 2 hypervisors by RAM usage" in result["answer"]
+    assert "- `cmp-2`: `96.0 GiB`" in result["answer"]
+    assert "- `cmp-1`: `64.0 GiB`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_bottom_n_hypervisors_by_vm_load(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for bottom-n hypervisor summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 11, "compute_status": "up"},
+            "cmp-2": {"vm_count": 2, "compute_status": "up"},
+            "cmp-3": {"vm_count": 6, "compute_status": "up"},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("bottom 2 hypervisors by vm load", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "hypervisor_metric_top_n"
+    assert "Bottom 2 hypervisors by VM load" in result["answer"]
+    assert "- `cmp-2`: `2`" in result["answer"]
+    assert "- `cmp-3`: `6`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
 def test_fallback_parser_leaves_networking_diagnosis_question_unknown():
     parsed = assistant_service._parse_query_fallback("What should I look at first if networking feels unhealthy for this project?")
 

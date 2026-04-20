@@ -110,8 +110,12 @@ _RESOURCE_SUMMARY_INTENTS = {
     "node_ready_summary",
     "control_plane_component_summary",
     "kernel_version_summary",
+    "kernel_drift_summary",
+    "kubelet_drift_summary",
     "missing_node_agent_summary",
     "reboot_needed_summary",
+    "node_attention_summary",
+    "os_image_drift_summary",
     "empty_compute_nodes_summary",
     "busiest_hypervisor_summary",
     "emptiest_hypervisor_summary",
@@ -497,7 +501,7 @@ def _intent_signals(lower: str) -> dict[str, bool]:
         "connectivity": _contains_any(lower, ("connected", "highly connected", "busy", "dense", "central")),
         "posture": _contains_any(lower, ("bootable", "encrypted", "multiattach")),
         "idle": _contains_word(lower, "idle") or _contains_word(lower, "unused") or _contains_word(lower, "free") or _contains_word(lower, "unassigned"),
-        "ranking": _contains_any(lower, ("busiest", "most busy", "most loaded", "top ", "hosts the most", "host the most")),
+        "ranking": _contains_any(lower, ("busiest", "most busy", "most loaded", "least loaded", "fewest", "bottom ", "top ", "hosts the most", "host the most")),
         "security_audit": _contains_any(lower, ("audit", "insecure", "secure", "risky")),
         "security_lockdown": _contains_any(lower, ("lock", "tighten", "suggest", "recommend")),
         "navigate": _contains_any(lower, ("open ", "show ", "inspect ", "review ", "find ", "go to ", "take me to ")),
@@ -571,6 +575,17 @@ def _environment_metric_choices() -> list[dict[str, Any]]:
 
 def _extract_top_n(query: str) -> int | None:
     match = re.search(r"\btop\s+(\d{1,2})\b", str(query or ""), re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except Exception:
+        return None
+    return max(1, min(value, 10))
+
+
+def _extract_bottom_n(query: str) -> int | None:
+    match = re.search(r"\bbottom\s+(\d{1,2})\b", str(query or ""), re.IGNORECASE)
     if not match:
         return None
     try:
@@ -687,11 +702,39 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "resource_name": "kernel",
             "needs_clarification": False,
         }
+    if _contains_any(lower, ("kernel", "kernels")) and _contains_any(lower, ("behind", "outdated", "drift", "updates", "update")):
+        return {
+            "intent": "kernel_drift_summary",
+            "resource_kind": "environment",
+            "resource_name": "kernel_drift",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("kubelet", "kubernetes version", "k8s version")) and _contains_any(lower, ("behind", "outdated", "drift", "versions", "version")):
+        return {
+            "intent": "kubelet_drift_summary",
+            "resource_kind": "environment",
+            "resource_name": "kubelet_drift",
+            "needs_clarification": False,
+        }
     if _contains_any(lower, ("node agent", "node-agent", "agent")) and _contains_any(lower, ("missing", "without", "no ", "not reporting", "not ready", "unavailable")):
         return {
             "intent": "missing_node_agent_summary",
             "resource_kind": "environment",
             "resource_name": "node_agent",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("os image", "operating system", "os version", "os", "image")) and _contains_any(lower, ("drift", "different", "mismatch", "versions", "version")):
+        return {
+            "intent": "os_image_drift_summary",
+            "resource_kind": "environment",
+            "resource_name": "os_image_drift",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("nodes", "node", "hosts", "host")) and _contains_any(lower, ("attention", "attention first", "highest risk", "most risk", "riskiest", "needs attention", "need attention")):
+        return {
+            "intent": "node_attention_summary",
+            "resource_kind": "environment",
+            "resource_name": "node_attention",
             "needs_clarification": False,
         }
     if _contains_any(lower, ("reboot", "reboots", "rebooted", "restarting")) and _contains_any(lower, ("need", "needs", "should", "required", "pending")):
@@ -709,14 +752,24 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "needs_clarification": False,
         }
     top_n = _extract_top_n(text)
-    if top_n and _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "host", "hosts", "node", "nodes")):
+    bottom_n = _extract_bottom_n(text)
+    rank_n = top_n or bottom_n
+    if rank_n and _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "host", "hosts", "node", "nodes")):
+        if bottom_n and _contains_any(lower, ("vm", "vms", "instance", "instances", "load", "busy", "loaded")):
+            return {
+                "intent": "hypervisor_metric_top_n",
+                "resource_kind": "environment",
+                "resource_name": "hypervisor_empty",
+                "needs_clarification": False,
+                "top_n": rank_n,
+            }
         if _contains_any(lower, ("busy", "busiest", "loaded", "most loaded", "vm", "vms", "instance", "instances")):
             return {
                 "intent": "hypervisor_metric_top_n",
                 "resource_kind": "environment",
                 "resource_name": "hypervisor_load",
                 "needs_clarification": False,
-                "top_n": top_n,
+                "top_n": rank_n,
             }
         if _contains_any(lower, ("ram", "memory")):
             return {
@@ -724,7 +777,7 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
                 "resource_kind": "environment",
                 "resource_name": "hypervisor_ram",
                 "needs_clarification": False,
-                "top_n": top_n,
+                "top_n": rank_n,
             }
         if _contains_any(lower, ("cpu", "vcpu", "vcpus")):
             return {
@@ -732,7 +785,7 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
                 "resource_kind": "environment",
                 "resource_name": "hypervisor_cpu",
                 "needs_clarification": False,
-                "top_n": top_n,
+                "top_n": rank_n,
             }
         if _contains_any(lower, ("disk", "storage")):
             return {
@@ -740,7 +793,7 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
                 "resource_kind": "environment",
                 "resource_name": "hypervisor_disk",
                 "needs_clarification": False,
-                "top_n": top_n,
+                "top_n": rank_n,
             }
     if _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "hosts", "nodes")) and _contains_any(lower, ("emptiest", "least busy", "least loaded", "fewest vms", "fewest instances", "lightest load")):
         return {
@@ -1001,7 +1054,7 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
         "instance_project, instance_ips, instance_networks, project_network_summary, project_storage_summary, "
         "security_group_audit, security_group_lockdown_suggestions, security_group_insecure_check, "
         "etcd_health_summary, mariadb_node_summary, cluster_health_overview, node_ready_summary, control_plane_component_summary, "
-        "kernel_version_summary, missing_node_agent_summary, reboot_needed_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, "
+        "kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, missing_node_agent_summary, reboot_needed_summary, node_attention_summary, os_image_drift_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, "
         "port_attachment_status, port_public_exposure, router_external_status, router_connectivity_summary, "
         "volume_attachment_summary, volume_posture, floating_ip_instance_status, floating_ip_lookup_by_fixed_ip, floating_ip_idle_status, "
         "open_resource, unknown. "
@@ -1069,12 +1122,12 @@ def _parse_environment_query_with_provider(query: str, fallback: dict[str, Any] 
     )
     system_prompt = (
         "Classify environment and fleet questions into JSON only. "
-        "Allowed intents: kernel_version_summary, missing_node_agent_summary, reboot_needed_summary, "
-        "empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, unknown. "
+        "Allowed intents: kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, missing_node_agent_summary, reboot_needed_summary, "
+        "node_attention_summary, os_image_drift_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, unknown. "
         "Map freeform wording about environment-wide compute, host, node, hypervisor, kernel, RAM, reboot, VM density, or missing agents "
         "to the closest supported intent. "
         "Return keys: intent, resource_kind, resource_name, needs_clarification, clarifying_question, top_n. "
-        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, node_agent, reboot, compute_empty, hypervisor_load, hypervisor_empty, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
+        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, kernel_drift, kubelet_drift, node_agent, reboot, node_attention, os_image_drift, compute_empty, hypervisor_load, hypervisor_empty, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
         "Never include markdown."
     )
     user_prompt = json.dumps({"query": query})

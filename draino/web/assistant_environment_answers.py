@@ -74,6 +74,20 @@ def _collect_kernel_facts(k8s_auth=None) -> tuple[list[dict[str, Any]], list[str
     return facts, errors
 
 
+def _collect_k8s_node_version_facts(k8s_auth=None) -> tuple[list[dict[str, Any]], list[str]]:
+    nodes = k8s_ops.get_nodes(auth=k8s_auth)
+    facts: list[dict[str, Any]] = []
+    for node in nodes:
+        facts.append({
+            "name": str(node.get("name") or ""),
+            "hostname": str(node.get("hostname") or node.get("name") or ""),
+            "kubelet_version": str(node.get("kubelet_version") or "").strip(),
+            "os_image": str(node.get("os_image") or "").strip(),
+            "container_runtime": str(node.get("container_runtime") or "").strip(),
+        })
+    return facts, []
+
+
 def _collect_node_agent_facts(k8s_auth=None) -> tuple[list[dict[str, Any]], str]:
     nodes = k8s_ops.get_nodes(auth=k8s_auth)
     error = ""
@@ -117,6 +131,55 @@ def _collect_compute_facts(openstack_auth=None, k8s_auth=None, include_signals: 
             "kernel_version": str(signals.get("kernel_version") or node.get("kernel_version") or "").strip(),
             "latest_kernel_version": str(signals.get("latest_kernel_version") or "").strip(),
             "reboot_required": bool(signals.get("reboot_required", False)),
+        })
+    return facts, errors
+
+
+def _collect_node_attention_facts(openstack_auth=None, k8s_auth=None) -> tuple[list[dict[str, Any]], list[str]]:
+    nodes = k8s_ops.get_nodes(auth=k8s_auth)
+    errors: list[str] = []
+    try:
+        summaries = openstack_ops.get_all_host_summaries(auth=openstack_auth)
+    except Exception as exc:
+        summaries = {}
+        errors.append(str(exc))
+    try:
+        ready_node_agents = set(node_agent_client.get_ready_node_names())
+    except Exception as exc:
+        ready_node_agents = set()
+        errors.append(str(exc))
+    facts: list[dict[str, Any]] = []
+    for node in nodes:
+        name = str(node.get("name") or "")
+        hostname = str(node.get("hostname") or name)
+        signals = k8s_ops.get_node_host_signals(name, hostname)
+        if signals.get("error"):
+            errors.append(str(signals.get("error")))
+        summary = _lookup_host_summary(summaries, hostname, name)
+        kernel_version = str(signals.get("kernel_version") or node.get("kernel_version") or "").strip()
+        latest_kernel_version = str(signals.get("latest_kernel_version") or "").strip()
+        reboot_required = bool(signals.get("reboot_required", False))
+        node_agent_ready = name in ready_node_agents
+        kernel_behind = bool(latest_kernel_version and kernel_version and latest_kernel_version != kernel_version)
+        risk_flags: list[str] = []
+        if kernel_behind:
+            risk_flags.append("kernel behind latest")
+        if reboot_required:
+            risk_flags.append("reboot required")
+        if not node_agent_ready:
+            risk_flags.append("node agent missing")
+        facts.append({
+            "name": name,
+            "hostname": hostname,
+            "is_compute": bool(node.get("is_compute")),
+            "vm_count": int(summary.get("vm_count", 0) or 0),
+            "kernel_version": kernel_version,
+            "latest_kernel_version": latest_kernel_version,
+            "reboot_required": reboot_required,
+            "node_agent_ready": node_agent_ready,
+            "kernel_behind": kernel_behind,
+            "risk_flags": risk_flags,
+            "risk_count": len(risk_flags),
         })
     return facts, errors
 
@@ -462,6 +525,175 @@ def answer_empty_compute_nodes_summary(openstack_auth=None, k8s_auth=None) -> di
     }
 
 
+def answer_kernel_drift_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_kernel_facts(k8s_auth=k8s_auth)
+    behind = sorted(
+        (
+            fact for fact in facts
+            if fact["latest_kernel_version"] and fact["kernel_version"] and fact["latest_kernel_version"] != fact["kernel_version"]
+        ),
+        key=lambda fact: fact["name"],
+    )
+    answer_lines = [f"Nodes behind the latest observed kernel: {len(behind)}"]
+    if behind:
+        answer_lines.append("")
+        for fact in behind[:10]:
+            answer_lines.append(
+                f"- `{fact['name']}`: running `{fact['kernel_version']}`, latest seen `{fact['latest_kernel_version']}`"
+            )
+        if len(behind) > 10:
+            answer_lines.append(f"- and {len(behind) - 10} more")
+    findings = []
+    if behind:
+        findings.append("Kernel drift nodes\n" + "\n".join(f"- {fact['name']}" for fact in behind[:10]))
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "kernel_drift_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.88 if not errors else 0.68,
+        "entities": [{"kind": "environment", "id": "kernel_drift", "label": "kernel drift"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"behind_count": len(behind), "node_total": len(facts)},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes and node-agent data",
+    }
+
+
+def answer_kubelet_drift_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_node_version_facts(k8s_auth=k8s_auth)
+    versions = sorted({fact["kubelet_version"] for fact in facts if fact["kubelet_version"]}, key=_version_key)
+    if not versions:
+        return {
+            "intent": "kubelet_drift_summary",
+            "answer": "I could not determine kubelet versions from the current node inventory.",
+            "confidence": 0.45,
+            "entities": [{"kind": "environment", "id": "kubelet_drift", "label": "kubelet drift"}],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node inventory",
+        }
+    latest = versions[-1]
+    behind = sorted(
+        (fact for fact in facts if fact["kubelet_version"] and fact["kubelet_version"] != latest),
+        key=lambda fact: fact["name"],
+    )
+    answer_lines = [f"Nodes behind the latest observed kubelet version: {len(behind)}"]
+    answer_lines.append("")
+    answer_lines.append(f"- Latest observed kubelet: `{latest}`")
+    if behind:
+        for fact in behind[:10]:
+            answer_lines.append(f"- `{fact['name']}`: `{fact['kubelet_version']}`")
+        if len(behind) > 10:
+            answer_lines.append(f"- and {len(behind) - 10} more")
+    findings = []
+    if behind:
+        findings.append("Kubelet drift nodes\n" + "\n".join(f"- {fact['name']} ({fact['kubelet_version']})" for fact in behind[:10]))
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "kubelet_drift_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.88 if not errors else 0.68,
+        "entities": [{"kind": "environment", "id": "kubelet_drift", "label": "kubelet drift"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"latest_kubelet": latest, "behind_count": len(behind), "node_total": len(facts)},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node inventory",
+    }
+
+
+def answer_os_image_drift_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_node_version_facts(k8s_auth=k8s_auth)
+    images = sorted({fact["os_image"] for fact in facts if fact["os_image"]})
+    if not images:
+        return {
+            "intent": "os_image_drift_summary",
+            "answer": "I could not determine node OS images from the current inventory.",
+            "confidence": 0.45,
+            "entities": [{"kind": "environment", "id": "os_image_drift", "label": "OS image drift"}],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node inventory",
+        }
+    counts: dict[str, int] = {}
+    for fact in facts:
+        image = fact["os_image"] or "unknown"
+        counts[image] = counts.get(image, 0) + 1
+    majority_image = max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+    drift = sorted(
+        (fact for fact in facts if fact["os_image"] and fact["os_image"] != majority_image),
+        key=lambda fact: fact["name"],
+    )
+    answer_lines = [f"Nodes on a non-majority OS image: {len(drift)}"]
+    answer_lines.append("")
+    answer_lines.append(f"- Majority OS image: `{majority_image}`")
+    if drift:
+        for fact in drift[:10]:
+            answer_lines.append(f"- `{fact['name']}`: `{fact['os_image']}`")
+        if len(drift) > 10:
+            answer_lines.append(f"- and {len(drift) - 10} more")
+    findings = []
+    if drift:
+        findings.append("OS image drift nodes\n" + "\n".join(f"- {fact['name']} ({fact['os_image']})" for fact in drift[:10]))
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "os_image_drift_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.86 if not errors else 0.66,
+        "entities": [{"kind": "environment", "id": "os_image_drift", "label": "OS image drift"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"majority_os_image": majority_image, "drift_count": len(drift), "node_total": len(facts)},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node inventory",
+    }
+
+
+def answer_node_attention_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_node_attention_facts(openstack_auth=openstack_auth, k8s_auth=k8s_auth)
+    ranked = sorted(
+        (fact for fact in facts if fact["risk_count"] > 0),
+        key=lambda fact: (-int(fact["risk_count"]), str(fact["name"])),
+    )
+    answer_lines = [f"Nodes needing the most attention: {len(ranked)}"]
+    if ranked:
+        answer_lines.append("")
+        for fact in ranked[:8]:
+            answer_lines.append(f"- `{fact['name']}`: {', '.join(fact['risk_flags'])}")
+    findings = []
+    if ranked:
+        findings.append("Highest-risk nodes\n" + "\n".join(f"- {fact['name']} ({fact['risk_count']} signals)" for fact in ranked[:8]))
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "node_attention_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.84 if not errors else 0.64,
+        "entities": [{"kind": "environment", "id": "node_attention", "label": "node attention"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"flagged_count": len(ranked), "node_total": len(facts)},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes, OpenStack, and node-agent data",
+    }
+
+
 def answer_hypervisor_metric_summary(intent: str, openstack_auth=None, k8s_auth=None) -> dict[str, Any] | None:
     config = HYPERVISOR_METRIC_SUMMARIES.get(str(intent or "").strip())
     if config is None:
@@ -585,8 +817,12 @@ def answer_emptiest_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> di
 
 ENVIRONMENT_SUMMARY_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
     "kernel_version_summary": answer_kernel_version_summary,
+    "kernel_drift_summary": answer_kernel_drift_summary,
+    "kubelet_drift_summary": answer_kubelet_drift_summary,
     "missing_node_agent_summary": answer_missing_node_agent_summary,
     "reboot_needed_summary": answer_reboot_needed_summary,
+    "node_attention_summary": answer_node_attention_summary,
+    "os_image_drift_summary": answer_os_image_drift_summary,
     "empty_compute_nodes_summary": answer_empty_compute_nodes_summary,
     **{intent: answer_hypervisor_metric_summary for intent in HYPERVISOR_METRIC_SUMMARIES},
 }
@@ -601,6 +837,6 @@ def answer_environment_summary(intent: str, openstack_auth=None, k8s_auth=None) 
         return None
     if intent in HYPERVISOR_METRIC_SUMMARIES:
         return handler(intent, openstack_auth=openstack_auth, k8s_auth=k8s_auth)
-    if intent in {"kernel_version_summary", "missing_node_agent_summary"}:
+    if intent in {"kernel_version_summary", "kernel_drift_summary", "kubelet_drift_summary", "missing_node_agent_summary", "os_image_drift_summary"}:
         return handler(k8s_auth=k8s_auth)
     return handler(openstack_auth=openstack_auth, k8s_auth=k8s_auth)
