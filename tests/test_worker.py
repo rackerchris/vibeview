@@ -261,3 +261,79 @@ def test_run_workflow_reports_remaining_instance_names_on_timeout(monkeypatch):
     assert state.nova_evacuation_status == "blocked"
     assert "web-1" in state.nova_evacuation_detail
     assert "db-1" in state.nova_evacuation_detail
+
+
+def test_run_drain_quick_is_noop_when_already_drained(monkeypatch):
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=True)
+    state.k8s_drain_status = "drained"
+
+    monkeypatch.setattr(
+        worker.k8s_ops,
+        "cordon_node",
+        lambda name, log, auth=None: (_ for _ in ()).throw(AssertionError("cordon should not run")),
+    )
+    monkeypatch.setattr(
+        worker.k8s_ops,
+        "drain_node",
+        lambda name, log, auth=None: (_ for _ in ()).throw(AssertionError("drain should not run")),
+    )
+
+    logs: list[str] = []
+    worker.run_drain_quick(
+        state,
+        update_cb=lambda: None,
+        log_cb=logs.append,
+    )
+
+    assert state.phase == NodePhase.IDLE
+    assert logs == ["'node-1' already drained — no Kubernetes action needed"]
+
+
+def test_run_undrain_is_noop_when_already_schedulable(monkeypatch):
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=False)
+    state.k8s_drain_status = "clear"
+
+    monkeypatch.setattr(
+        worker.k8s_ops,
+        "uncordon_node",
+        lambda name, log, auth=None: (_ for _ in ()).throw(AssertionError("uncordon should not run")),
+    )
+
+    logs: list[str] = []
+    worker.run_undrain(
+        state,
+        update_cb=lambda: None,
+        log_cb=logs.append,
+    )
+
+    assert state.phase == NodePhase.IDLE
+    assert logs == ["'node-1' already schedulable — no Kubernetes action needed"]
+
+
+def test_run_workflow_is_noop_when_already_evacuated(monkeypatch):
+    state = NodeState(
+        k8s_name="node-1",
+        hypervisor="hv-1",
+        is_compute=True,
+        compute_status="disabled",
+        vm_count=0,
+        amphora_count=0,
+    )
+
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "disable_compute_service",
+        lambda hypervisor, log, auth=None: (_ for _ in ()).throw(AssertionError("disable should not run")),
+    )
+
+    logs: list[str] = []
+    worker.run_workflow(
+        state,
+        update_cb=lambda: None,
+        log_cb=logs.append,
+    )
+
+    assert state.phase == NodePhase.COMPLETE
+    assert state.nova_evacuation_status == "evacuated"
+    assert state.nova_evacuation_detail == "compute service disabled and hypervisor already empty"
+    assert logs == ["'node-1' already evacuated — no Nova action needed"]

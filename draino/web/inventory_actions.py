@@ -68,6 +68,13 @@ class InventoryActionsMixin:
         if state.phase == NodePhase.RUNNING:
             self._push({"type": "log", "node": node_name, "message": "Evacuation already in progress.", "color": "warn"})
             return
+        if state.compute_status == "disabled" and (state.vm_count or 0) == 0 and (state.amphora_count or 0) == 0:
+            state.phase = NodePhase.IDLE
+            state.nova_evacuation_status = "evacuated"
+            state.nova_evacuation_detail = "compute service disabled and hypervisor already empty"
+            self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
+            self._push({"type": "log", "node": node_name, "message": f"Nova evacuation already complete on {node_name}.", "color": "dim"})
+            return
 
         state.phase = NodePhase.RUNNING
         state.instances = []
@@ -141,6 +148,9 @@ class InventoryActionsMixin:
         state = self.node_states.get(node_name)
         if not state or state.phase == NodePhase.RUNNING:
             return
+        if state.k8s_cordoned and state.k8s_drain_status == "drained":
+            self._push({"type": "log", "node": node_name, "message": f"Kubernetes drain already complete on {node_name}.", "color": "dim"})
+            return
 
         state.phase = NodePhase.RUNNING
         state.k8s_drain_status = "in_progress"
@@ -161,6 +171,9 @@ class InventoryActionsMixin:
     def action_undrain(self, node_name: str) -> None:
         state = self.node_states.get(node_name)
         if not state or state.phase == NodePhase.RUNNING:
+            return
+        if not state.k8s_cordoned and state.k8s_drain_status == "clear":
+            self._push({"type": "log", "node": node_name, "message": f"Kubernetes scheduling is already enabled on {node_name}.", "color": "dim"})
             return
 
         state.phase = NodePhase.UNDRAINING

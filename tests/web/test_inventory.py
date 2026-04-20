@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from draino.models import NodeState
+from draino.models import NodePhase, NodeState
 from draino.web import inventory_actions
 from draino.web import server as web_server
 
@@ -143,6 +143,73 @@ def test_enable_nova_logs_when_service_is_already_enabled(tmp_path):
         "message": "Nova compute service is already enabled.",
         "color": "dim",
     }]
+
+
+def test_drain_logs_when_node_is_already_drained(tmp_path):
+    server = web_server.DrainoServer(audit_log=str(tmp_path / "audit.log"))
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=True)
+    state.k8s_drain_status = "drained"
+    server.node_states["node-1"] = state
+
+    pushed: list[dict] = []
+    server._push = pushed.append
+
+    server.action_drain_quick("node-1")
+
+    assert pushed == [{
+        "type": "log",
+        "node": "node-1",
+        "message": "Kubernetes drain already complete on node-1.",
+        "color": "dim",
+    }]
+
+
+def test_undrain_logs_when_node_is_already_schedulable(tmp_path):
+    server = web_server.DrainoServer(audit_log=str(tmp_path / "audit.log"))
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=False)
+    state.k8s_drain_status = "clear"
+    server.node_states["node-1"] = state
+
+    pushed: list[dict] = []
+    server._push = pushed.append
+
+    server.action_undrain("node-1")
+
+    assert pushed == [{
+        "type": "log",
+        "node": "node-1",
+        "message": "Kubernetes scheduling is already enabled on node-1.",
+        "color": "dim",
+    }]
+
+
+def test_evacuate_marks_host_complete_when_already_empty(tmp_path):
+    server = web_server.DrainoServer(audit_log=str(tmp_path / "audit.log"))
+    state = NodeState(
+        k8s_name="node-1",
+        hypervisor="hv-1",
+        is_compute=True,
+        compute_status="disabled",
+        vm_count=0,
+        amphora_count=0,
+    )
+    server.node_states["node-1"] = state
+
+    pushed: list[dict] = []
+    server._push = pushed.append
+
+    server.action_evacuate("node-1")
+
+    assert state.phase == NodePhase.IDLE
+    assert state.nova_evacuation_status == "evacuated"
+    assert state.nova_evacuation_detail == "compute service disabled and hypervisor already empty"
+    assert pushed[0]["type"] == "state_update"
+    assert pushed[1] == {
+        "type": "log",
+        "node": "node-1",
+        "message": "Nova evacuation already complete on node-1.",
+        "color": "dim",
+    }
 
 
 def test_load_nodes_bg_skips_host_signals_during_silent_refresh_until_ttl(monkeypatch, tmp_path):

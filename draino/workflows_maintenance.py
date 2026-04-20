@@ -178,6 +178,14 @@ def run_drain_quick(
     openstack_auth=None,
 ) -> None:
     del openstack_ops, openstack_auth
+    if state.k8s_cordoned and state.k8s_drain_status == "drained":
+        state.phase = NodePhase.IDLE
+        state.k8s_drain_detail = state.k8s_drain_detail or "node already drained"
+        log_cb(f"'{state.k8s_name}' already drained — no Kubernetes action needed")
+        if audit_cb:
+            audit_cb("completed", "already drained")
+        update_cb()
+        return
     ctx = WorkflowContext(
         state=state,
         update_cb=update_cb,
@@ -230,6 +238,14 @@ def run_undrain(
     openstack_auth=None,
 ) -> None:
     del openstack_ops, openstack_auth
+    if not state.k8s_cordoned and state.k8s_drain_status == "clear":
+        state.phase = NodePhase.IDLE
+        state.k8s_drain_detail = ""
+        log_cb(f"'{state.k8s_name}' already schedulable — no Kubernetes action needed")
+        if audit_cb:
+            audit_cb("completed", "already schedulable")
+        update_cb()
+        return
     ctx = WorkflowContext(
         state=state,
         update_cb=update_cb,

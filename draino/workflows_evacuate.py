@@ -40,6 +40,16 @@ def run_workflow(
     k8s_auth=None,
     openstack_auth=None,
 ) -> None:
+    if state.compute_status == "disabled" and (state.vm_count or 0) == 0 and (state.amphora_count or 0) == 0:
+        state.phase = NodePhase.COMPLETE
+        state.instances = []
+        state.nova_evacuation_status = "evacuated"
+        state.nova_evacuation_detail = "compute service disabled and hypervisor already empty"
+        log_cb(f"'{state.k8s_name}' already evacuated — no Nova action needed")
+        if audit_cb:
+            audit_cb("completed", "already evacuated")
+        update_cb()
+        return
     ctx = workflows_maintenance.WorkflowContext(
         state=state,
         update_cb=update_cb,
