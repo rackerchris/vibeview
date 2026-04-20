@@ -55,6 +55,7 @@ function refreshSelectedInstancePortStats() {
 function renderInstancesTab(nd) {
   const showEvacuate = hasOpenStackAuth();
   const expandedId = expandedInstanceIdByNode[nd.k8s_name] || '';
+  const isEvacuationIssue = nd.nova_evacuation_status === 'disabled' || nd.nova_evacuation_status === 'blocked';
   const instanceRefreshPill = nd.preflight_loading
     ? `<span class="node-refresh-indicator active" title="Refreshing VM list">
         <span class="spinner">⟳</span>
@@ -68,21 +69,57 @@ function renderInstancesTab(nd) {
   </div>`;
 
   if (nd.instances?.length) {
+    const sortedInstances = [...nd.instances].sort((a, b) => {
+      const rank = (inst) => {
+        const op = inst.is_amphora ? (inst.failover_status || 'pending') : (inst.migration_status || 'pending');
+        if (op === 'failed') return 0;
+        if (inst.is_amphora && op !== 'complete') return 1;
+        if (!inst.is_amphora && op !== 'complete') return 2;
+        return 3;
+      };
+      const diff = rank(a) - rank(b);
+      if (diff) return diff;
+      return String(a.name || a.id || '').localeCompare(String(b.name || b.id || ''), undefined, { numeric: true, sensitivity: 'base' });
+    });
+    const failedResidents = sortedInstances.filter((inst) => (inst.is_amphora ? inst.failover_status : inst.migration_status) === 'failed');
+    const activeResidents = sortedInstances.filter((inst) => {
+      const op = inst.is_amphora ? (inst.failover_status || 'pending') : (inst.migration_status || 'pending');
+      return op !== 'complete' && op !== 'failed';
+    });
+    if (isEvacuationIssue || failedResidents.length || activeResidents.length) {
+      h += `<div class="instance-evac-banner ${nd.nova_evacuation_status === 'blocked' ? 'blocked' : 'warn'}">
+        <div class="instance-evac-banner-title">${nd.nova_evacuation_status === 'blocked' ? 'Evacuation Blocked' : nd.nova_evacuation_status === 'disabled' ? 'Nova Disabled, Host Not Yet Empty' : 'Evacuation In Progress'}</div>
+        <div>${esc(nd.nova_evacuation_detail || 'The host still has Nova work remaining.')}</div>
+        <div class="instance-evac-banner-meta">
+          <span>${failedResidents.length} failed</span>
+          <span>${activeResidents.length} still on host</span>
+          <span>${sortedInstances.filter((inst) => inst.is_amphora).length} Amphora</span>
+        </div>
+      </div>`;
+    }
     h += `<div class="tab-section-title"><span>Nova Instances — Migration Status <span class="hint">vMotion Progress</span></span>${instanceRefreshPill}</div>
     <table class="data-table" id="inst-data-table">
       <thead><tr>
         <th>Name <span class="hint">VM Name</span></th><th>Type</th>
         <th>Nova State <span class="hint">Power State</span></th>
         <th>Operation <span class="hint">vMotion</span></th>
+        <th>Resident</th>
       </tr></thead><tbody>`;
-    for (const inst of nd.instances) {
+    for (const inst of sortedInstances) {
       const tp = inst.is_amphora ? `<span class="tag-amp">Amphora LB</span>` : 'VM';
       const op = inst.is_amphora ? (inst.failover_status || 'pending') : (inst.migration_status || 'pending');
       const phc = { complete: 'ph-complete', failed: 'ph-failed', migrating: 'ph-migrate', 'cold-migrating': 'ph-migrate', confirming: 'ph-migrate', failing_over: 'ph-migrate' }[op] || 'ph-queued';
       const dotc = { ACTIVE: 'green', ERROR: 'red' }[inst.status] || 'gray';
-      h += `<tr><td>${esc(inst.name)}</td><td>${tp}</td>
+      const resident = op === 'complete'
+        ? `<span class="ph-badge ph-complete">moved</span>`
+        : op === 'failed'
+          ? `<span class="ph-badge ph-failed">remaining</span>`
+          : `<span class="ph-badge ph-running">remaining</span>`;
+      const rowClass = op === 'failed' ? 'instance-row-failed' : op === 'complete' ? 'instance-row-complete' : 'instance-row-active';
+      h += `<tr class="${rowClass}"><td>${esc(inst.name)}</td><td>${tp}</td>
         <td><span class="sdot ${dotc}"></span>${esc(inst.status)}</td>
-        <td><span class="ph-badge ${phc}">${esc(op)}</span></td></tr>`;
+        <td><span class="ph-badge ${phc}">${esc(op)}</span></td>
+        <td>${resident}</td></tr>`;
     }
     h += `</tbody></table>`;
   } else if (nd.is_compute) {
