@@ -8,6 +8,8 @@ function renderSummaryTab(nd) {
   const detLoading = det.loading;
   const k8sDrainStatus = nd.k8s_drain_status || 'clear';
   const novaEvacStatus = nd.nova_evacuation_status || 'clear';
+  const maintenanceGuidance = getNodeMaintenanceGuidance(nd);
+  const maintenanceSteps = uniqueGuidanceLines(maintenanceGuidance.steps);
   const maintenanceLabel = nd.maintenance_ready
     ? 'Ready for Maintenance'
     : k8sDrainStatus !== 'drained'
@@ -112,6 +114,11 @@ function renderSummaryTab(nd) {
   }
 
   h += `<div class="runtime-note" style="margin-bottom:10px">${esc(maintenanceLabel)}</div>`;
+  h += `<div class="maintenance-guidance maintenance-guidance-${escAttr(maintenanceGuidance.tone)}" style="margin-bottom:12px">
+    <div class="maintenance-guidance-title">${esc(maintenanceGuidance.title)}</div>
+    <div class="maintenance-guidance-summary">${esc(maintenanceGuidance.summary)}</div>
+    ${maintenanceSteps.length ? `<div class="maintenance-guidance-steps">${maintenanceSteps.map((step) => `<div class="maintenance-guidance-step">${esc(step)}</div>`).join('')}</div>` : ''}
+  </div>`;
 
   const k8sd = det.k8s || {};
   const novd = det.nova || {};

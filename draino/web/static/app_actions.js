@@ -26,6 +26,7 @@ function updateActionButtons(nd) {
   const busy    = ['running','rebooting','undraining'].includes(phase);
 
   const evBtn = document.getElementById('bc-evacuate');
+  const enBtn = document.getElementById('bc-enable-nova');
   const drBtn = document.getElementById('bc-drain');
   const rbBtn = document.getElementById('bc-reboot');
 
@@ -33,6 +34,11 @@ function updateActionButtons(nd) {
   evBtn.disabled    = busy || !nd.is_compute;
   evBtn.className   = `btn ${evacuated || novaDisabledOnly ? 'warning' : 'primary'}`;
   evBtn.style.display = hasOpenStackAuth() ? '' : 'none';
+
+  enBtn.textContent = '↺ Re-enable Nova';
+  enBtn.disabled = busy || !nd.is_compute || nd.compute_status !== 'disabled';
+  enBtn.className = 'btn warning';
+  enBtn.style.display = hasOpenStackAuth() && nd.is_compute && nd.compute_status === 'disabled' ? '' : 'none';
 
   drBtn.textContent = phase === 'undraining' ? '↺ Undraining…' : k8sMaintenanceActive ? '↺ Undrain' : '▽ Drain';
   drBtn.disabled    = busy;
@@ -92,6 +98,21 @@ async function actionEvacuate() {
     submitClass: 'btn primary',
     blocked: false,
     bodyHtml: buildEvacuateConfirmHtml(nodeEvacuatePreflightCache[selectedNode]),
+  });
+}
+function actionEnableNova() {
+  if (!selectedNode) return;
+  const nd = nodes[selectedNode];
+  if (!nd?.is_compute || nd.compute_status !== 'disabled') return;
+  openActionConfirm({
+    kind: 'enable_nova',
+    node: selectedNode,
+    title: 'Confirm Nova Re-enable',
+    submitLabel: 'Re-enable Nova',
+    submitClass: 'btn warning',
+    blocked: false,
+    requiresFresh: false,
+    bodyHtml: buildEnableNovaConfirmHtml(nd),
   });
 }
 function actionReboot()   { if (selectedNode) wsSend({ action: 'reboot_request', node: selectedNode }); }
@@ -166,6 +187,7 @@ function buildActionStat(label, value) {
 
 function actionConfirmCacheFor(kind, nodeName) {
   if (!nodeName) return null;
+  if (kind === 'enable_nova') return null;
   return kind === 'drain' ? nodeDrainPreflightCache[nodeName] : nodeEvacuatePreflightCache[nodeName];
 }
 
@@ -177,6 +199,7 @@ function actionConfirmAgeText(cache) {
 }
 
 function actionConfirmIsStale(config, cache) {
+  if (config?.requiresFresh === false) return false;
   if (!cache?.fetchedAt) return true;
   if (config?.stateDirty) return true;
   return (Date.now() - new Date(cache.fetchedAt).getTime()) > ACTION_CONFIRM_STALE_MS;
@@ -241,6 +264,23 @@ function buildEvacuateConfirmHtml(preview) {
   `;
 }
 
+function buildEnableNovaConfirmHtml(nd) {
+  const residentSummary = (nodeEvacuationResidentsCache[nd.k8s_name] || {}).summary || {};
+  const residents = residentSummary.instances ?? nd.vm_count ?? 0;
+  const amphora = residentSummary.amphora ?? nd.amphora_count ?? 0;
+  const failed = residentSummary.failed || 0;
+  return `
+    <p>Re-enable Nova will allow the scheduler to place instances on this host again. Kubernetes drain state is not touched.</p>
+    <div class="action-confirm-grid">
+      ${buildActionStat('Current residents', residents)}
+      ${buildActionStat('Amphora', amphora)}
+      ${buildActionStat('Failed migrations', failed)}
+    </div>
+    <div class="action-confirm-note warn">Use this when you want to back out of maintenance or pause evacuation. Any current residents will remain on the host.</div>
+    ${nd.nova_evacuation_detail ? `<div class="action-confirm-note">${esc(nd.nova_evacuation_detail)}</div>` : ''}
+  `;
+}
+
 function openActionConfirm(config) {
   pendingActionConfirm = { ...config, openedAt: Date.now(), stateDirty: false };
   document.getElementById('action-confirm-title').textContent = config.title || 'Confirm Action';
@@ -266,16 +306,19 @@ function renderActionConfirm() {
   const cache = actionConfirmCacheFor(pendingActionConfirm.kind, pendingActionConfirm.node);
   const stale = actionConfirmIsStale(pendingActionConfirm, cache);
   const changed = !!pendingActionConfirm.stateDirty;
+  const requiresFresh = pendingActionConfirm.requiresFresh !== false;
   const statusTone = changed ? 'block' : stale ? 'warn' : '';
-  const statusText = changed
-    ? 'Node state changed while this dialog was open. Refresh preflight before continuing.'
-    : stale
-      ? 'Preflight is stale. Refresh before continuing.'
-      : `Preflight last checked ${actionConfirmAgeText(cache)}.`;
+  const statusText = !requiresFresh
+    ? 'This action applies immediately and does not require a preflight refresh.'
+    : changed
+      ? 'Node state changed while this dialog was open. Refresh preflight before continuing.'
+      : stale
+        ? 'Preflight is stale. Refresh before continuing.'
+        : `Preflight last checked ${actionConfirmAgeText(cache)}.`;
   const body = `
     <div class="action-confirm-toolbar">
       <div class="action-confirm-note ${statusTone}">${esc(statusText)}</div>
-      <button class="btn" type="button" onclick="refreshActionConfirm()">↺ Refresh Preflight</button>
+      ${requiresFresh ? '<button class="btn" type="button" onclick="refreshActionConfirm()">↺ Refresh Preflight</button>' : ''}
     </div>
     ${pendingActionConfirm.bodyHtml || ''}
   `;
@@ -303,6 +346,9 @@ async function refreshActionConfirm() {
     const preview = nodeEvacuatePreflightCache[node] || {};
     pendingActionConfirm.bodyHtml = buildEvacuateConfirmHtml(preview);
     pendingActionConfirm.blocked = false;
+  } else if (kind === 'enable_nova') {
+    pendingActionConfirm.bodyHtml = buildEnableNovaConfirmHtml(nodes[node] || {});
+    pendingActionConfirm.blocked = false;
   }
   pendingActionConfirm.stateDirty = false;
   renderActionConfirm();
@@ -320,6 +366,7 @@ function confirmAction() {
   closeActionConfirm();
   if (kind === 'drain') wsSend({ action: 'drain_quick', node });
   if (kind === 'evacuate') wsSend({ action: 'evacuate', node });
+  if (kind === 'enable_nova') wsSend({ action: 'enable_nova', node });
 }
 
 // ════════════════════════════════════════════════════════════════════════════

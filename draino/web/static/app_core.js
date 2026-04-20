@@ -75,6 +75,119 @@ const instanceDetailCache = {}; // instance_id -> { loading, data, error }
 const expandedInstanceIdByNode = {}; // node_name -> instance_id
 const expandedPortIdByInstance = {}; // instance_id -> port_id
 
+function uniqueGuidanceLines(lines) {
+  const seen = new Set();
+  return (lines || []).filter((line) => {
+    const value = String(line || '').trim();
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function blockerOwnerSummary(blockers) {
+  const counts = { stateful: 0, static: 0, bare: 0, other: 0 };
+  for (const item of blockers || []) {
+    const owner = String(item?.owner || '').toLowerCase();
+    if (owner.includes('statefulset')) counts.stateful += 1;
+    else if (owner.includes('static') || owner.includes('mirror')) counts.static += 1;
+    else if (owner.includes('bare') || owner.includes('unmanaged') || owner.includes('none')) counts.bare += 1;
+    else counts.other += 1;
+  }
+  return counts;
+}
+
+function getNodeMaintenanceGuidance(nd) {
+  const guidance = {
+    tone: nd.maintenance_ready ? 'green' : 'yellow',
+    title: nd.maintenance_ready ? 'Ready for Maintenance' : 'Next Action',
+    summary: '',
+    steps: [],
+    listHint: '',
+  };
+  const drainPreflight = nodeDrainPreflightCache[nd.k8s_name] || {};
+  const evacResidents = nodeEvacuationResidentsCache[nd.k8s_name] || {};
+  const blockers = drainPreflight.blockers || [];
+  const blockerCounts = blockerOwnerSummary(blockers);
+  const residentSummary = evacResidents.summary || {};
+  const residentCount = residentSummary.instances ?? nd.vm_count ?? 0;
+  const amphoraCount = residentSummary.amphora ?? nd.amphora_count ?? 0;
+  const failedMigrations = residentSummary.failed || 0;
+  const failoverFailed = residentSummary.failover_failed || 0;
+  const failoverPending = residentSummary.failover_pending || 0;
+
+  if (nd.maintenance_ready) {
+    guidance.summary = 'Kubernetes drain and Nova evacuation are complete.';
+    guidance.steps = ['Safe to reboot or perform host maintenance.'];
+    guidance.listHint = 'Safe for reboot or other host work.';
+    return guidance;
+  }
+
+  if (nd.k8s_drain_status === 'blocked') {
+    guidance.tone = 'red';
+    guidance.summary = nd.k8s_drain_detail || 'Kubernetes drain is blocked.';
+    if (blockerCounts.stateful) guidance.steps.push(`Handle ${blockerCounts.stateful} StatefulSet pod${blockerCounts.stateful === 1 ? '' : 's'} manually before draining again.`);
+    if (blockerCounts.static) guidance.steps.push(`Move or stop ${blockerCounts.static} static or mirror pod${blockerCounts.static === 1 ? '' : 's'} before draining again.`);
+    if (blockerCounts.bare) guidance.steps.push(`Review ${blockerCounts.bare} unmanaged pod${blockerCounts.bare === 1 ? '' : 's'} and decide whether to delete or relocate them.`);
+    if (blockerCounts.other) guidance.steps.push(`Review ${blockerCounts.other} additional blocking pod${blockerCounts.other === 1 ? '' : 's'} and rerun Drain after manual handling.`);
+    if (!guidance.steps.length) guidance.steps.push('Resolve the blocking Kubernetes workloads, then rerun Drain.');
+    guidance.listHint = guidance.steps[0];
+    return guidance;
+  }
+
+  if (nd.k8s_cordoned && nd.k8s_drain_status !== 'drained') {
+    guidance.summary = 'Kubernetes scheduling is blocked, but drain is not complete.';
+    guidance.steps = ['Run Drain to evict eligible pods, or click Drain again later to uncordon the node.'];
+    guidance.listHint = guidance.steps[0];
+    return guidance;
+  }
+
+  if (nd.is_compute && nd.nova_evacuation_status === 'blocked') {
+    guidance.tone = 'red';
+    guidance.summary = nd.nova_evacuation_detail || 'Nova evacuation is blocked.';
+    if (failedMigrations) guidance.steps.push(`Investigate ${failedMigrations} failed migration${failedMigrations === 1 ? '' : 's'}, then click Resume Evacuation.`);
+    if (failoverFailed) guidance.steps.push(`Resolve ${failoverFailed} failed Amphora failover${failoverFailed === 1 ? '' : 's'} before retrying evacuation.`);
+    if (residentCount) guidance.steps.push(`${residentCount} instance${residentCount === 1 ? '' : 's'} still remain on the host.`);
+    guidance.steps.push('If you need to back out of maintenance, use Re-enable Nova to reopen scheduling on this host.');
+    if (!guidance.steps.length) guidance.steps.push('Resolve the Nova-side blocker, then resume evacuation.');
+    guidance.listHint = guidance.steps[0];
+    return guidance;
+  }
+
+  if (nd.is_compute && nd.nova_evacuation_status === 'disabled') {
+    guidance.summary = nd.nova_evacuation_detail || 'Nova is disabled, but the host is not yet evacuated.';
+    if (failedMigrations) guidance.steps.push(`Fix ${failedMigrations} failed migration${failedMigrations === 1 ? '' : 's'}, then click Resume Evacuation.`);
+    else if (failoverFailed) guidance.steps.push(`Resolve ${failoverFailed} failed Amphora failover${failoverFailed === 1 ? '' : 's'}, then resume evacuation.`);
+    else if (failoverPending) guidance.steps.push(`Wait for ${failoverPending} Amphora failover${failoverPending === 1 ? '' : 's'} to finish, or retry evacuation if progress stalls.`);
+    else if (residentCount) guidance.steps.push(`Resume Evacuation to clear ${residentCount} remaining instance${residentCount === 1 ? '' : 's'} from the host.`);
+    if (amphoraCount) guidance.steps.push(`${amphoraCount} Amphora instance${amphoraCount === 1 ? '' : 's'} still require network load-balancer attention.`);
+    guidance.steps.push('Use Re-enable Nova if you want to stop maintenance and allow scheduling on this host again.');
+    if (!guidance.steps.length) guidance.steps.push('Resume Evacuation until the hypervisor is empty.');
+    guidance.listHint = guidance.steps[0];
+    return guidance;
+  }
+
+  if (nd.is_compute && nd.k8s_drain_status === 'drained' && nd.nova_evacuation_status !== 'evacuated') {
+    guidance.summary = 'Kubernetes is ready, but Nova evacuation still needs to run.';
+    guidance.steps = ['Run Evacuate to disable Nova and move instances off the host.'];
+    guidance.listHint = guidance.steps[0];
+    return guidance;
+  }
+
+  if (nd.k8s_drain_status !== 'drained') {
+    guidance.summary = 'Kubernetes drain has not completed yet.';
+    guidance.steps = ['Run Drain to cordon the node and evict drain-safe pods.'];
+    if (nd.is_compute) guidance.steps.push('After Drain completes, run Evacuate to clear Nova instances.');
+    guidance.listHint = guidance.steps[0];
+    return guidance;
+  }
+
+  guidance.summary = 'Maintenance posture is incomplete.';
+  guidance.steps = ['Review the node summary and complete the remaining maintenance action.'];
+  guidance.listHint = guidance.steps[0];
+  return guidance;
+}
+
 // Node network config cache (configure tab)
 // node_name → { annLoading, annotations, ifacesLoading, ifaces, ifacesError }
 const nodeNetworkCache = {};

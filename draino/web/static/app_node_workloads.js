@@ -57,6 +57,8 @@ function renderInstancesTab(nd) {
   const expandedId = expandedInstanceIdByNode[nd.k8s_name] || '';
   const isEvacuationIssue = nd.nova_evacuation_status === 'disabled' || nd.nova_evacuation_status === 'blocked';
   const liveResidents = nodeEvacuationResidentsCache[nd.k8s_name] || { loading: false, summary: {}, items: [] };
+  const maintenanceGuidance = getNodeMaintenanceGuidance(nd);
+  const maintenanceSteps = uniqueGuidanceLines(maintenanceGuidance.steps);
   const instanceRefreshPill = nd.preflight_loading
     ? `<span class="node-refresh-indicator active" title="Refreshing VM list">
         <span class="spinner">⟳</span>
@@ -99,6 +101,7 @@ function renderInstancesTab(nd) {
           <span>${activeResidents.length} still on host</span>
           <span>${sortedInstances.filter((inst) => inst.is_amphora).length} Amphora</span>
         </div>
+        ${maintenanceSteps.length ? `<div class="instance-evac-guidance">${maintenanceSteps.map((step) => `<div class="instance-evac-guidance-step">${esc(step)}</div>`).join('')}</div>` : ''}
         ${liveResidents.loading ? `<div class="runtime-note"><span class="spinner">⟳</span> Refreshing current host residents…</div>` : ''}
         ${liveResidents.error ? `<div class="runtime-note" style="color:var(--red)">${esc(liveResidents.error)}</div>` : ''}
       </div>`;

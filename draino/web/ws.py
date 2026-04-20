@@ -47,6 +47,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 server.start_refresh(silent=True)
             elif action == "evacuate" and node:
                 server.action_evacuate(node)
+            elif action == "enable_nova" and node:
+                server.action_enable_nova(node)
             elif action == "drain_quick" and node:
                 server.action_drain_quick(node)
             elif action == "undrain" and node:

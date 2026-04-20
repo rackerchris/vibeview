@@ -211,6 +211,7 @@ function renderObjHeader(nd) {
 
   const phaseColors = { running:'yellow', complete:'green', error:'red', rebooting:'magenta', undraining:'cyan' };
   const phaseLabels = { running:'Workflow Running', complete:'Complete', error:'Error', rebooting:'Rebooting', undraining:'Undraining' };
+  const maintenanceGuidance = getNodeMaintenanceGuidance(nd);
   const badges = [];
   const noSched = noScheduleTaints(nd);
   if (nd.phase !== 'idle')
@@ -221,7 +222,7 @@ function renderObjHeader(nd) {
   if (nd.k8s_drain_status === 'drained')
     badges.push(`<span class="badge blue">K8s Drained</span>`);
   else if (nd.k8s_drain_status === 'blocked')
-    badges.push(`<span class="badge yellow" title="${escAttr(nd.k8s_drain_detail || 'Kubernetes drain blocked')}">Drain Blocked</span>`);
+    badges.push(`<span class="badge yellow" title="${escAttr(maintenanceGuidance.listHint || nd.k8s_drain_detail || 'Kubernetes drain blocked')}">Drain Blocked</span>`);
   if (noSched.length)
     badges.push(`<span class="badge red">NoSchedule</span>`);
   if (nd.is_edge)
@@ -240,12 +241,12 @@ function renderObjHeader(nd) {
     if (nd.nova_evacuation_status === 'evacuated')
       badges.push(`<span class="badge blue">Evacuated</span>`);
     else if (nd.nova_evacuation_status === 'disabled')
-      badges.push(`<span class="badge yellow" title="${escAttr(nd.nova_evacuation_detail || 'Nova disabled but instances remain on host')}">Disabled, Not Evacuated</span>`);
+      badges.push(`<span class="badge yellow" title="${escAttr(maintenanceGuidance.listHint || nd.nova_evacuation_detail || 'Nova disabled but instances remain on host')}">Disabled, Not Evacuated</span>`);
     else if (nd.nova_evacuation_status === 'blocked')
-      badges.push(`<span class="badge yellow" title="${escAttr(nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`);
+      badges.push(`<span class="badge yellow" title="${escAttr(maintenanceGuidance.listHint || nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`);
     badges.push(`<span class="badge blue">Compute Node</span>`);
   }
-  if (nd.maintenance_ready) badges.push(`<span class="badge green">Ready for Maintenance</span>`);
+  if (nd.maintenance_ready) badges.push(`<span class="badge green" title="${escAttr(maintenanceGuidance.listHint || 'Kubernetes drain and Nova evacuation are complete')}">Ready for Maintenance</span>`);
   if (nd.is_etcd) badges.push(`<span class="tree-badge etcd">etcd</span>`);
   if (nd.hosts_mariadb) badges.push(`<span class="tree-badge mariadb">mariadb</span>`);
   if (nd.is_edge) badges.push(`<span class="tree-badge edge">edge</span>`);

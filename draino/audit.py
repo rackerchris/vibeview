@@ -25,7 +25,7 @@ class AuditLogger:
         user        OS username of the operator
         hostname    Machine running draino
         session_id  UUID, unique per draino invocation
-        action      evacuation | drain_quick | undrain | reboot
+        action      evacuation | enable_nova | drain_quick | undrain | reboot
         node        Kubernetes node name
         event       started | completed | failed | blocked | cancelled
         detail      Free-form context string (step detail, error text, etc.)

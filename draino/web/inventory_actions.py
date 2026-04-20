@@ -89,6 +89,54 @@ class InventoryActionsMixin:
             daemon=True,
         ).start()
 
+    def action_enable_nova(self, node_name: str) -> None:
+        state = self.node_states.get(node_name)
+        if not state:
+            return
+        if not state.is_compute:
+            self._push({"type": "log", "node": node_name, "message": "Not a compute node — Nova does not apply here.", "color": "warn"})
+            return
+        if state.phase == NodePhase.RUNNING:
+            self._push({"type": "log", "node": node_name, "message": "Cannot re-enable Nova while evacuation is running.", "color": "warn"})
+            return
+        if state.compute_status != "disabled":
+            self._push({"type": "log", "node": node_name, "message": "Nova compute service is already enabled.", "color": "dim"})
+            return
+
+        audit_cb = self._audit_cb("enable_nova", node_name)
+        audit_cb("started")
+        self._push({"type": "log", "node": node_name, "message": f"Re-enabling Nova compute service on {node_name}…", "color": "important"})
+
+        threading.Thread(
+            target=self._enable_nova_bg,
+            args=(node_name, audit_cb),
+            daemon=True,
+        ).start()
+
+    def _enable_nova_bg(self, node_name: str, audit_cb) -> None:
+        state = self.node_states.get(node_name)
+        if not state:
+            return
+        log = self._log_cb(node_name)
+        try:
+            openstack_ops.enable_compute_service(state.hypervisor, log, auth=self.openstack_auth)
+        except Exception as exc:
+            audit_cb("failed", str(exc))
+            self._push({"type": "log", "node": node_name, "message": f"Failed to re-enable Nova on {node_name}: {exc}", "color": "warn"})
+            return
+
+        state.compute_status = "up"
+        state.phase = NodePhase.IDLE
+        state.steps = []
+        state.instances = []
+        state.preflight_instances = []
+        state.preflight_loading = False
+        state.nova_evacuation_status = "clear"
+        state.nova_evacuation_detail = "nova compute service enabled"
+        audit_cb("completed", f"hypervisor={state.hypervisor}")
+        self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
+        self._push({"type": "log", "node": node_name, "message": f"Nova compute service re-enabled on {node_name}.", "color": "green"})
+
     def action_drain_quick(self, node_name: str) -> None:
         state = self.node_states.get(node_name)
         if not state or state.phase == NodePhase.RUNNING:

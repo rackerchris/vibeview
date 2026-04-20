@@ -477,6 +477,7 @@ function taintLabel(t) {
 function treeItemHtml(name, nd) {
   const sel = name === selectedNode ? ' selected' : '';
   const mismatch = nd.compute_missing_from_openstack ? ' warning' : '';
+  const maintenanceGuidance = getNodeMaintenanceGuidance(nd);
   const maintenanceClass = nd.maintenance_ready
     ? ' maintenance-ready'
     : nd.k8s_drain_status === 'blocked' || nd.nova_evacuation_status === 'blocked'
@@ -505,17 +506,17 @@ function treeItemHtml(name, nd) {
   const k8sDrainBdg = nd.k8s_drain_status === 'drained'
     ? `<span class="tree-badge ready" title="${escAttr(nd.k8s_drain_detail || 'Kubernetes drain complete')}">K8s Ready</span>`
     : nd.k8s_drain_status === 'blocked'
-      ? `<span class="tree-badge risk" title="${escAttr(nd.k8s_drain_detail || 'Kubernetes drain blocked')}">Drain Blocked</span>`
+      ? `<span class="tree-badge risk" title="${escAttr(maintenanceGuidance.listHint || nd.k8s_drain_detail || 'Kubernetes drain blocked')}">Drain Blocked</span>`
       : '';
   const novaDisabledBdg = nd.compute_status === 'disabled' ? `<span class="tree-badge nosched" title="Nova compute service is disabled">Nova Disabled</span>` : '';
   const evacuatedBdg = nd.nova_evacuation_status === 'evacuated'
     ? `<span class="tree-badge ready" title="${escAttr(nd.nova_evacuation_detail || 'Hypervisor evacuated')}">Evacuated</span>`
     : nd.nova_evacuation_status === 'disabled'
-      ? `<span class="tree-badge warn" title="${escAttr(nd.nova_evacuation_detail || 'Nova disabled but instances remain on host')}">Not Evacuated</span>`
+      ? `<span class="tree-badge warn" title="${escAttr(maintenanceGuidance.listHint || nd.nova_evacuation_detail || 'Nova disabled but instances remain on host')}">Not Evacuated</span>`
     : nd.nova_evacuation_status === 'blocked'
-      ? `<span class="tree-badge risk" title="${escAttr(nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`
+      ? `<span class="tree-badge risk" title="${escAttr(maintenanceGuidance.listHint || nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`
       : '';
-  const readyBdg = nd.maintenance_ready ? `<span class="tree-badge ready-strong" title="Kubernetes drain and Nova evacuation are complete">Ready for Maintenance</span>` : '';
+  const readyBdg = nd.maintenance_ready ? `<span class="tree-badge ready-strong" title="${escAttr(maintenanceGuidance.listHint || 'Kubernetes drain and Nova evacuation are complete')}">Ready for Maintenance</span>` : '';
   const noSchedBdg = noSched.length
     ? `<span class="tree-badge nosched" title="${escAttr(noSched.map(taintLabel).join(', '))}">NoSchedule</span>`
     : '';

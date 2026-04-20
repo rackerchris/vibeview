@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from draino.models import NodeState
+from draino.web import inventory_actions
 from draino.web import server as web_server
 
 
@@ -77,6 +78,70 @@ def test_reboot_request_requires_node_to_be_drained(tmp_path):
         "node": "node-1",
         "message": "Nova evacuation must be completed before reboot.",
         "color": "warn",
+    }]
+
+
+def test_enable_nova_reopens_compute_service_and_clears_evacuation_state(monkeypatch, tmp_path):
+    server = web_server.DrainoServer(
+        openstack_auth=object(),
+        role_names=["admin"],
+        audit_log=str(tmp_path / "audit.log"),
+    )
+    state = NodeState(
+        k8s_name="node-1",
+        hypervisor="hv-1",
+        is_compute=True,
+        compute_status="disabled",
+        vm_count=2,
+        amphora_count=1,
+    )
+    state.nova_evacuation_status = "blocked"
+    state.nova_evacuation_detail = "nova disabled but not evacuated"
+    state.instances = [object()]
+    state.preflight_instances = [{"id": "vm-1"}]
+    server.node_states["node-1"] = state
+
+    pushed: list[dict] = []
+    server._push = pushed.append
+    class _ImmediateThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            if self._target:
+                self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr(inventory_actions.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(web_server.openstack_ops, "enable_compute_service", lambda hypervisor, log, auth=None: log(f"enabled {hypervisor}"))
+
+    server.action_enable_nova("node-1")
+
+    assert state.compute_status == "up"
+    assert state.nova_evacuation_status == "clear"
+    assert state.nova_evacuation_detail == "nova compute service enabled"
+    assert state.instances == []
+    assert state.preflight_instances == []
+    assert any(msg["type"] == "state_update" and msg["node"] == "node-1" for msg in pushed)
+    assert any(msg["type"] == "log" and msg["message"] == "Nova compute service re-enabled on node-1." for msg in pushed)
+
+
+def test_enable_nova_logs_when_service_is_already_enabled(tmp_path):
+    server = web_server.DrainoServer(audit_log=str(tmp_path / "audit.log"))
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", is_compute=True, compute_status="up")
+    server.node_states["node-1"] = state
+
+    pushed: list[dict] = []
+    server._push = pushed.append
+
+    server.action_enable_nova("node-1")
+
+    assert pushed == [{
+        "type": "log",
+        "node": "node-1",
+        "message": "Nova compute service is already enabled.",
+        "color": "dim",
     }]
 
 

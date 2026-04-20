@@ -45,6 +45,7 @@
     <!-- Node-specific actions: shown only when a node is selected -->
     <div id="bc-node-actions" style="display:none;gap:6px;align-items:center">
       <button class="btn primary" id="bc-evacuate" onclick="actionEvacuate()">▶ Evacuate</button>
+      <button class="btn warning" id="bc-enable-nova" onclick="actionEnableNova()" style="display:none">↺ Re-enable Nova</button>
       <button class="btn"         id="bc-drain"    onclick="actionDrainOrUndrain()">▽ Drain</button>
       <button class="btn danger"  id="bc-reboot"   onclick="actionReboot()">⏻ Reboot</button>
       <button class="btn"         id="bc-refresh-node" onclick="actionRefreshNode()">↺ Refresh Node</button>

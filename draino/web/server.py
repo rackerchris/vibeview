@@ -15,6 +15,7 @@ Server → Client:
 Client → Server:
   {"action": "refresh"}
   {"action": "evacuate",       "node": name}
+  {"action": "enable_nova",    "node": name}
   {"action": "drain_quick",    "node": name}
   {"action": "undrain",        "node": name}
   {"action": "reboot_request", "node": name}
