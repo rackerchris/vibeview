@@ -157,7 +157,16 @@ async function actionDrainOrUndrain() {
   const nd = nodes[selectedNode]; if (!nd) return;
   const action = (nd.k8s_drain_status !== 'clear' || nd.k8s_cordoned) ? 'undrain' : 'drain_quick';
   if (action === 'undrain') {
-    wsSend({ action, node: selectedNode });
+    openActionConfirm({
+      kind: 'undrain',
+      node: selectedNode,
+      title: nd.k8s_drain_status === 'drained' ? 'Confirm Kubernetes Undrain' : 'Confirm Clear Cordon',
+      submitLabel: nd.k8s_drain_status === 'drained' ? 'Undrain' : 'Clear Cordon',
+      submitClass: 'btn warning',
+      blocked: false,
+      requiresFresh: false,
+      bodyHtml: buildUndrainConfirmHtml(nd),
+    });
     return;
   }
   await loadNodeDrainPreflight(selectedNode, true);
@@ -187,7 +196,7 @@ function buildActionStat(label, value) {
 
 function actionConfirmCacheFor(kind, nodeName) {
   if (!nodeName) return null;
-  if (kind === 'enable_nova') return null;
+  if (kind === 'enable_nova' || kind === 'undrain') return null;
   return kind === 'drain' ? nodeDrainPreflightCache[nodeName] : nodeEvacuatePreflightCache[nodeName];
 }
 
@@ -261,6 +270,24 @@ function buildEvacuateConfirmHtml(preview) {
       <div class="action-confirm-section-title">Sample Instances</div>
       ${items.length ? `<ul class="action-confirm-list">${items.slice(0, 8).map(item => `<li><strong>${esc(item.name || item.id || '')}</strong> — ${esc(item.status || 'unknown')}${item.is_amphora ? ' · Amphora' : item.is_volume_backed ? ' · volume-backed' : ' · ephemeral'}</li>`).join('')}</ul>` : '<div class="action-confirm-note">No instances are currently on this host.</div>'}
     </div>
+  `;
+}
+
+function buildUndrainConfirmHtml(nd) {
+  const podCache = lastPodsCache?.node === nd.k8s_name ? lastPodsCache : null;
+  const pods = Array.isArray(podCache?.pods) ? podCache.pods.filter((pod) => !pod.error) : [];
+  const running = pods.filter((pod) => String(pod.phase || '').toLowerCase() === 'running').length;
+  const pending = pods.filter((pod) => String(pod.phase || '').toLowerCase() === 'pending').length;
+  return `
+    <p>${nd.k8s_drain_status === 'drained' ? 'Undrain will uncordon the node and allow Kubernetes scheduling here again.' : 'Clear Cordon will allow Kubernetes scheduling here again.'} Nova compute state is not touched.</p>
+    <div class="action-confirm-grid">
+      ${buildActionStat('Cordoned', nd.k8s_cordoned ? 'Yes' : 'No')}
+      ${buildActionStat('Running pods', running)}
+      ${buildActionStat('Pending pods', pending)}
+    </div>
+    <div class="action-confirm-note warn">Use this only when you want the node to accept Kubernetes workloads again.</div>
+    ${podCache ? '' : '<div class="action-confirm-note">This browser has not fetched pod context for the node yet, so the workload counts above may be incomplete.</div>'}
+    ${nd.k8s_drain_detail ? `<div class="action-confirm-note">${esc(nd.k8s_drain_detail)}</div>` : ''}
   `;
 }
 
@@ -349,6 +376,9 @@ async function refreshActionConfirm() {
   } else if (kind === 'enable_nova') {
     pendingActionConfirm.bodyHtml = buildEnableNovaConfirmHtml(nodes[node] || {});
     pendingActionConfirm.blocked = false;
+  } else if (kind === 'undrain') {
+    pendingActionConfirm.bodyHtml = buildUndrainConfirmHtml(nodes[node] || {});
+    pendingActionConfirm.blocked = false;
   }
   pendingActionConfirm.stateDirty = false;
   renderActionConfirm();
@@ -367,6 +397,7 @@ function confirmAction() {
   if (kind === 'drain') wsSend({ action: 'drain_quick', node });
   if (kind === 'evacuate') wsSend({ action: 'evacuate', node });
   if (kind === 'enable_nova') wsSend({ action: 'enable_nova', node });
+  if (kind === 'undrain') wsSend({ action: 'undrain', node });
 }
 
 // ════════════════════════════════════════════════════════════════════════════

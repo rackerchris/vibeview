@@ -181,11 +181,30 @@ function renderObjectLink(label, onclickJs) {
 
 function renderPodsTab(nd) {
   const drained = nd.k8s_drain_status !== 'clear' || nd.k8s_cordoned;
+  const maintenanceGuidance = getNodeMaintenanceGuidance(nd);
+  const maintenanceSteps = uniqueGuidanceLines(maintenanceGuidance.steps);
+  const podCache = lastPodsCache?.node === nd.k8s_name ? lastPodsCache : null;
+  const pods = Array.isArray(podCache?.pods) ? podCache.pods.filter((pod) => !pod.error) : [];
+  const runningPods = pods.filter((pod) => String(pod.phase || '').toLowerCase() === 'running').length;
+  const pendingPods = pods.filter((pod) => String(pod.phase || '').toLowerCase() === 'pending').length;
   let h = `<div class="inst-toolbar">
-    <button class="btn ${drained ? 'warning' : ''}" onclick="actionDrainOrUndrain()">${drained ? '↺ Undrain' : '▽ Drain'}</button>
+    <button class="btn ${drained ? 'warning' : ''}" onclick="actionDrainOrUndrain()">${nd.k8s_drain_status === 'drained' ? '↺ Undrain' : drained ? '↺ Clear Cordon' : '▽ Drain'}</button>
     <span style="flex:1"></span>
     <span style="color:var(--dim);font-size:11px">Succeeded pods can be hidden below.</span>
   </div>`;
+
+  if (drained) {
+    h += `<div class="pods-recovery-banner ${nd.k8s_drain_status === 'blocked' ? 'blocked' : nd.k8s_drain_status === 'drained' ? 'ready' : 'warn'}">
+      <div class="pods-recovery-banner-title">${nd.k8s_drain_status === 'drained' ? 'Kubernetes Drained' : nd.k8s_drain_status === 'blocked' ? 'Drain Blocked' : 'Cordoned, Not Yet Drained'}</div>
+      <div>${esc(maintenanceGuidance.summary || (nd.k8s_drain_status === 'drained' ? 'This node is cordoned and ready to be reopened when maintenance is done.' : 'This node is cordoned but Kubernetes drain work is incomplete.'))}</div>
+      <div class="pods-recovery-banner-meta">
+        <span>${nd.k8s_cordoned ? 'cordoned' : 'schedulable'}</span>
+        <span>${runningPods} running pods</span>
+        <span>${pendingPods} pending pods</span>
+      </div>
+      ${maintenanceSteps.length ? `<div class="pods-recovery-guidance">${maintenanceSteps.map((step) => `<div class="pods-recovery-guidance-step">${esc(step)}</div>`).join('')}</div>` : ''}
+    </div>`;
+  }
 
   h += `<div class="tab-section-title" style="margin-top:10px">
     <span>Kubernetes Pods <span class="hint">Containerised Workloads</span></span>
