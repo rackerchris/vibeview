@@ -204,3 +204,60 @@ def test_run_workflow_evacuates_nova_only(monkeypatch):
     assert state.phase == NodePhase.COMPLETE
     assert state.k8s_cordoned is True
     assert state.nova_evacuation_status == "evacuated"
+
+
+def test_run_workflow_reports_remaining_instance_names_on_timeout(monkeypatch):
+    state = NodeState(k8s_name="node-2", hypervisor="hv-2", is_compute=True)
+    ticks = iter([1000.0, 1000.0, 1001.0, 1002.0, 1905.0])
+
+    monkeypatch.setattr(worker.time, "time", lambda: next(ticks))
+    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "disable_compute_service",
+        lambda hypervisor, log, auth=None: None,
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "list_servers_on_host",
+        lambda hypervisor, log, auth=None: [
+            {"id": "vm-1", "name": "web-1", "status": "ACTIVE", "is_amphora": False},
+            {"id": "vm-2", "name": "db-1", "status": "ACTIVE", "is_amphora": False},
+        ],
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "get_amphora_lb_mapping",
+        lambda log, auth=None: {},
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "live_migrate_server",
+        lambda instance_id, log, auth=None: None,
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "get_server_status",
+        lambda instance_id, auth=None: "ACTIVE",
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "get_server_migrations",
+        lambda instance_id, auth=None: [{"status": "completed"}],
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "count_servers_on_host",
+        lambda hypervisor, auth=None: 2,
+    )
+
+    worker.run_workflow(
+        state,
+        update_cb=lambda: None,
+        log_cb=lambda msg: None,
+    )
+
+    assert state.phase == NodePhase.ERROR
+    assert state.nova_evacuation_status == "blocked"
+    assert "web-1" in state.nova_evacuation_detail
+    assert "db-1" in state.nova_evacuation_detail

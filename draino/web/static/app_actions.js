@@ -1,5 +1,7 @@
 'use strict';
 
+let pendingActionConfirm = null;
+
 // ════════════════════════════════════════════════════════════════════════════
 // § ACTION BUTTONS
 // ════════════════════════════════════════════════════════════════════════════
@@ -17,6 +19,7 @@ function updateActionButtons(nd) {
   const k8sMaintenanceActive = nd.k8s_drain_status !== 'clear' || nd.k8s_cordoned;
   const k8sDrained = nd.k8s_drain_status === 'drained';
   const evacuated = nd.nova_evacuation_status === 'evacuated';
+  const novaDisabledOnly = nd.nova_evacuation_status === 'disabled';
   const rebootReady = !!nd.maintenance_ready;
   const busy    = ['running','rebooting','undraining'].includes(phase);
 
@@ -24,9 +27,9 @@ function updateActionButtons(nd) {
   const drBtn = document.getElementById('bc-drain');
   const rbBtn = document.getElementById('bc-reboot');
 
-  evBtn.textContent = phase === 'running' && nd.is_compute ? '▶ Evacuating…' : evacuated ? '▶ Evacuated' : '▶ Evacuate';
+  evBtn.textContent = phase === 'running' && nd.is_compute ? '▶ Evacuating…' : evacuated ? '▶ Evacuated' : novaDisabledOnly ? '▶ Resume Evacuation' : '▶ Evacuate';
   evBtn.disabled    = busy || !nd.is_compute;
-  evBtn.className   = `btn ${evacuated && !busy ? 'warning' : 'primary'}`;
+  evBtn.className   = `btn ${evacuated || novaDisabledOnly ? 'warning' : 'primary'}`;
   evBtn.style.display = hasOpenStackAuth() ? '' : 'none';
 
   drBtn.textContent = phase === 'undraining' ? '↺ Undraining…' : k8sMaintenanceActive ? '↺ Undrain' : '▽ Drain';
@@ -70,7 +73,21 @@ function actionRefreshAll()  {
   setNodeListRefreshing(true);
   wsSend({ action: 'refresh' });
 }
-function actionEvacuate() { if (selectedNode) wsSend({ action: 'evacuate',       node: selectedNode }); }
+async function actionEvacuate() {
+  if (!selectedNode) return;
+  const nd = nodes[selectedNode];
+  if (!nd?.is_compute) return;
+  await loadNodeEvacuatePreflight(selectedNode, true);
+  openActionConfirm({
+    kind: 'evacuate',
+    node: selectedNode,
+    title: 'Confirm Nova Evacuation',
+    submitLabel: 'Evacuate',
+    submitClass: 'btn primary',
+    blocked: false,
+    bodyHtml: buildEvacuateConfirmHtml(nodeEvacuatePreflightCache[selectedNode]),
+  });
+}
 function actionReboot()   { if (selectedNode) wsSend({ action: 'reboot_request', node: selectedNode }); }
 async function actionToggleNoSchedule() {
   if (!selectedNode) return;
@@ -108,11 +125,25 @@ function migrateInstance(instanceId) {
   renderTasksPanel();
 }
 
-function actionDrainOrUndrain() {
+async function actionDrainOrUndrain() {
   if (!selectedNode) return;
   const nd = nodes[selectedNode]; if (!nd) return;
   const action = (nd.k8s_drain_status !== 'clear' || nd.k8s_cordoned) ? 'undrain' : 'drain_quick';
-  wsSend({ action, node: selectedNode });
+  if (action === 'undrain') {
+    wsSend({ action, node: selectedNode });
+    return;
+  }
+  await loadNodeDrainPreflight(selectedNode, true);
+  const preview = nodeDrainPreflightCache[selectedNode] || {};
+  openActionConfirm({
+    kind: 'drain',
+    node: selectedNode,
+    title: 'Confirm Kubernetes Drain',
+    submitLabel: 'Drain',
+    submitClass: 'btn primary',
+    blocked: Number(preview.summary?.blocking || 0) > 0 || !!preview.error,
+    bodyHtml: buildDrainConfirmHtml(preview),
+  });
 }
 
 function actionPodsInline() {
@@ -121,6 +152,95 @@ function actionPodsInline() {
   wsSend({ action: 'get_pods', node: selectedNode });
   const sec = document.getElementById('pods-section');
   if (sec) sec.innerHTML = `<div style="color:var(--dim);font-size:12px"><span class="spinner">⟳</span> Fetching pods…</div>`;
+}
+
+function buildActionStat(label, value) {
+  return `<div class="action-confirm-stat"><div class="action-confirm-stat-label">${esc(label)}</div><div class="action-confirm-stat-value">${esc(String(value ?? 0))}</div></div>`;
+}
+
+function buildDrainConfirmHtml(preview) {
+  const evictable = Number(preview.summary?.evictable || 0);
+  const skipped = Number(preview.summary?.skipped || 0);
+  const blocking = Number(preview.summary?.blocking || 0);
+  const blockers = preview.blockers || [];
+  const skippedItems = preview.skipped || [];
+  const evictableItems = preview.evictable || [];
+  return `
+    <p>Drain will cordon the Kubernetes node and evict only drain-safe pods. Nova compute state is not touched.</p>
+    <div class="action-confirm-grid">
+      ${buildActionStat('Evictable', evictable)}
+      ${buildActionStat('Skipped', skipped)}
+      ${buildActionStat('Blocking', blocking)}
+    </div>
+    ${preview.error ? `<div class="action-confirm-note block">Preflight failed: ${esc(preview.error)}</div>` : ''}
+    ${blocking > 0 ? `<div class="action-confirm-note block">Drain cannot proceed until the blocking workloads below are handled.</div>` : ''}
+    ${blocking === 0 && preview.warning ? `<div class="action-confirm-note warn">${esc(preview.warning)}</div>` : ''}
+    <div class="action-confirm-section">
+      <div class="action-confirm-section-title">Blocking Workloads</div>
+      ${blockers.length ? `<ul class="action-confirm-list">${blockers.slice(0, 8).map(item => `<li><strong>${esc(item.ref)}</strong> — ${esc(item.reason || item.owner || '')}</li>`).join('')}</ul>` : '<div class="action-confirm-note">No blocking workloads detected.</div>'}
+    </div>
+    <div class="action-confirm-section">
+      <div class="action-confirm-section-title">Skipped Workloads</div>
+      ${skippedItems.length ? `<ul class="action-confirm-list">${skippedItems.slice(0, 6).map(item => `<li><strong>${esc(item.ref)}</strong> — ${esc(item.reason || item.owner || '')}</li>`).join('')}</ul>` : '<div class="action-confirm-note">No skipped workloads.</div>'}
+    </div>
+    <div class="action-confirm-section">
+      <div class="action-confirm-section-title">First Evictions</div>
+      ${evictableItems.length ? `<ul class="action-confirm-list">${evictableItems.slice(0, 6).map(item => `<li><strong>${esc(item.ref)}</strong> — ${esc(item.owner || '')}</li>`).join('')}</ul>` : '<div class="action-confirm-note">Nothing to evict.</div>'}
+    </div>
+  `;
+}
+
+function buildEvacuateConfirmHtml(preview) {
+  const items = preview.items || [];
+  const amphora = Number(preview.summary?.amphora || 0);
+  const ephemeral = Number(preview.summary?.ephemeral || 0);
+  const nd = selectedNode ? nodes[selectedNode] : null;
+  return `
+    <p>Evacuate will disable the Nova compute service and move instances off this hypervisor. Kubernetes drain state is not touched.</p>
+    ${nd?.compute_status === 'disabled' ? `<div class="action-confirm-note warn">Nova is already disabled on this host. This action will continue evacuation against the remaining instances.</div>` : ''}
+    <div class="action-confirm-grid">
+      ${buildActionStat('Instances', preview.summary?.instances || 0)}
+      ${buildActionStat('Regular VMs', preview.summary?.regular_vms || 0)}
+      ${buildActionStat('Amphora', amphora)}
+    </div>
+    <div class="action-confirm-grid">
+      ${buildActionStat('Volume-backed', preview.summary?.volume_backed || 0)}
+      ${buildActionStat('Ephemeral', ephemeral)}
+      ${buildActionStat('Active', preview.summary?.active || 0)}
+    </div>
+    ${preview.error ? `<div class="action-confirm-note block">Preflight failed: ${esc(preview.error)}</div>` : ''}
+    ${preview.warning ? `<div class="action-confirm-note ${amphora > 0 || ephemeral > 0 ? 'warn' : ''}">${esc(preview.warning)}</div>` : ''}
+    <div class="action-confirm-section">
+      <div class="action-confirm-section-title">Sample Instances</div>
+      ${items.length ? `<ul class="action-confirm-list">${items.slice(0, 8).map(item => `<li><strong>${esc(item.name || item.id || '')}</strong> — ${esc(item.status || 'unknown')}${item.is_amphora ? ' · Amphora' : item.is_volume_backed ? ' · volume-backed' : ' · ephemeral'}</li>`).join('')}</ul>` : '<div class="action-confirm-note">No instances are currently on this host.</div>'}
+    </div>
+  `;
+}
+
+function openActionConfirm(config) {
+  pendingActionConfirm = config;
+  document.getElementById('action-confirm-title').textContent = config.title || 'Confirm Action';
+  document.getElementById('action-confirm-node').textContent = config.node || '';
+  document.getElementById('action-confirm-body').innerHTML = config.bodyHtml || '';
+  const submit = document.getElementById('action-confirm-submit');
+  submit.textContent = config.submitLabel || 'Continue';
+  submit.className = config.submitClass || 'btn primary';
+  submit.disabled = !!config.blocked;
+  submit.title = config.blocked ? 'Resolve the blocking conditions before continuing.' : '';
+  document.getElementById('action-confirm-overlay').classList.add('open');
+}
+
+function closeActionConfirm() {
+  pendingActionConfirm = null;
+  document.getElementById('action-confirm-overlay').classList.remove('open');
+}
+
+function confirmAction() {
+  if (!pendingActionConfirm) return;
+  const { kind, node } = pendingActionConfirm;
+  closeActionConfirm();
+  if (kind === 'drain') wsSend({ action: 'drain_quick', node });
+  if (kind === 'evacuate') wsSend({ action: 'evacuate', node });
 }
 
 // ════════════════════════════════════════════════════════════════════════════

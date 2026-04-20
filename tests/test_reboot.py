@@ -51,6 +51,19 @@ def test_blocked_nova_evacuation_status_is_preserved_with_instances_remaining():
     assert state.effective_nova_evacuation_status() == "blocked"
 
 
+def test_disabled_nova_evacuation_status_is_explicit_when_instances_remain():
+    state = NodeState(
+        k8s_name="node-4",
+        hypervisor="hv-4",
+        is_compute=True,
+        compute_status="disabled",
+        vm_count=3,
+        amphora_count=1,
+    )
+
+    assert state.effective_nova_evacuation_status() == "disabled"
+
+
 def test_issue_reboot_uses_node_agent(monkeypatch):
     monkeypatch.setattr(node_agent_client, "enabled", lambda: True)
     monkeypatch.setattr(

@@ -503,6 +503,8 @@ function treeItemHtml(name, nd) {
   const novaDisabledBdg = nd.compute_status === 'disabled' ? `<span class="tree-badge nosched">Nova Disabled</span>` : '';
   const evacuatedBdg = nd.nova_evacuation_status === 'evacuated'
     ? `<span class="tree-badge blue">Evacuated</span>`
+    : nd.nova_evacuation_status === 'disabled'
+      ? `<span class="tree-badge warn" title="${escAttr(nd.nova_evacuation_detail || 'Nova disabled but instances remain on host')}">Not Evacuated</span>`
     : nd.nova_evacuation_status === 'blocked'
       ? `<span class="tree-badge warn" title="${escAttr(nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`
       : '';

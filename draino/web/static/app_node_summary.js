@@ -12,8 +12,10 @@ function renderSummaryTab(nd) {
     ? 'Ready for Maintenance'
     : k8sDrainStatus !== 'drained'
       ? 'Not Ready: Kubernetes drain incomplete'
-      : nd.is_compute && novaEvacStatus !== 'evacuated'
-        ? 'Not Ready: Nova evacuation incomplete'
+      : nd.is_compute && novaEvacStatus === 'disabled'
+        ? 'Not Ready: Nova still hosting instances'
+        : nd.is_compute && novaEvacStatus !== 'evacuated'
+          ? 'Not Ready: Nova evacuation incomplete'
         : 'Not Ready for Maintenance';
   const drainPreflight = nodeDrainPreflightCache[nd.k8s_name] || { loading: true, summary: {}, evictable: [], skipped: [], blockers: [] };
   const evacuatePreflight = nodeEvacuatePreflightCache[nd.k8s_name] || { loading: nd.is_compute, summary: {}, items: [] };
@@ -29,6 +31,18 @@ function renderSummaryTab(nd) {
     const names = items.slice(0, 3).map(item => `${item.namespace}/${item.name}`).join(', ');
     const more = items.length > 3 ? ` +${items.length - 3} more` : '';
     return `<div class="mrow"><span class="ml">${esc(title)}</span><span class="mv ${tone}" title="${esc(items.map(item => `${item.ref} (${item.owner})`).join('\n'))}">${esc(names + more)}</span></div>`;
+  }
+
+  function novaEvacTone(status) {
+    if (status === 'evacuated') return 'green';
+    if (status === 'blocked' || status === 'error') return 'red';
+    if (status === 'in_progress' || status === 'disabled') return 'yellow';
+    return '';
+  }
+
+  function novaEvacLabel(status) {
+    if (status === 'disabled') return 'disabled, not evacuated';
+    return String(status || 'clear').replace('_', ' ');
   }
 
   h += `<div class="concept-map">
@@ -138,7 +152,7 @@ function renderSummaryTab(nd) {
       <div class="card-title">Nova Compute <span class="hint">VMware Cluster</span></div>
       <div class="card-body">
         <div class="mrow"><span class="ml">Service state</span><span class="mv ${nc}">${esc(nl)}</span></div>
-        <div class="mrow"><span class="ml">Evacuation</span><span class="mv ${novaEvacStatus === 'evacuated' ? 'green' : novaEvacStatus === 'blocked' ? 'red' : novaEvacStatus === 'in_progress' ? 'yellow' : ''}">${esc(novaEvacStatus.replace('_', ' '))}</span></div>
+        <div class="mrow"><span class="ml">Evacuation</span><span class="mv ${novaEvacTone(novaEvacStatus)}">${esc(novaEvacLabel(novaEvacStatus))}</span></div>
         <div class="mrow"><span class="ml">Instances <span class="hint">VMs</span></span><span class="mv">${v}</span></div>
         <div class="mrow"><span class="ml">Amphora LBs <span class="hint">NSX LB</span></span><span class="mv ${a > 0 ? 'yellow' : ''}">${a}</span></div>
         ${nd.nova_evacuation_detail ? `<div class="runtime-note" style="margin-top:8px">${esc(nd.nova_evacuation_detail)}</div>` : ''}

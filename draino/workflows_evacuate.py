@@ -15,6 +15,19 @@ MIGRATE_TIMEOUT = 1800
 EMPTY_TIMEOUT = 900
 
 
+def _remaining_instance_names(openstack_ops, hypervisor: str, auth=None) -> list[str]:
+    try:
+        items = openstack_ops.list_servers_on_host(hypervisor, lambda _msg: None, auth=auth)
+    except Exception:
+        return []
+    names: list[str] = []
+    for item in items:
+        name = str(item.get("name") or item.get("id") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
 def run_workflow(
     state: NodeState,
     update_cb: UpdateFn,
@@ -46,6 +59,7 @@ def run_workflow(
     try:
         openstack_ops.disable_compute_service(state.hypervisor, ctx.log, auth=openstack_auth)
         state.compute_status = "disabled"
+        state.nova_evacuation_detail = "nova disabled; enumerating instances on host"
         ctx.step_set("disable_nova", StepStatus.SUCCESS)
     except Exception as exc:
         state.nova_evacuation_status = "error"
@@ -73,6 +87,7 @@ def run_workflow(
         n_amp = sum(1 for i in state.instances if i.is_amphora)
         state.vm_count = n_vm
         state.amphora_count = n_amp
+        state.nova_evacuation_detail = f"nova disabled; {n_vm} VM(s) and {n_amp} Amphora remain on host"
         ctx.step_set("list_instances", StepStatus.SUCCESS, f"{n_vm} VM(s), {n_amp} Amphora")
     except Exception as exc:
         state.nova_evacuation_status = "error"
@@ -144,6 +159,7 @@ def run_workflow(
 
             done_n = sum(1 for i in vms if i.migration_status == "complete")
             failed_n = sum(1 for i in vms if i.migration_status == "failed")
+            state.nova_evacuation_detail = f"nova disabled; migrating instances ({done_n}/{len(vms)} complete, {failed_n} failed)"
             step = state.get_step("migrate_vms")
             if step:
                 step.detail = f"{done_n}/{len(vms)} done, {failed_n} failed"
@@ -153,11 +169,15 @@ def run_workflow(
         failed_n = sum(1 for i in vms if i.migration_status == "failed")
         done_n = sum(1 for i in vms if i.migration_status == "complete")
         if failed_n:
+            failed_names = [i.name for i in vms if i.migration_status == "failed" and i.name]
+            names_suffix = f" ({', '.join(failed_names[:4])}{' +more' if len(failed_names) > 4 else ''})" if failed_names else ""
+            detail = f"{done_n}/{len(vms)} migrated — {failed_n} failed{names_suffix}"
             state.nova_evacuation_status = "blocked"
-            state.nova_evacuation_detail = f"{done_n}/{len(vms)} migrated — {failed_n} failed"
-            ctx.abort("migrate_vms", f"{done_n}/{len(vms)} migrated — {failed_n} failed")
+            state.nova_evacuation_detail = f"nova disabled but not evacuated; migration failures: {', '.join(failed_names[:4])}" if failed_names else detail
+            ctx.abort("migrate_vms", detail)
             return
         ctx.step_set("migrate_vms", StepStatus.SUCCESS, f"{done_n}/{len(vms)} migrated")
+        state.nova_evacuation_detail = "nova disabled; regular VM migrations complete"
 
     ctx.step_set("failover_lbs", StepStatus.RUNNING)
     amphora = [i for i in state.instances if i.is_amphora and i.lb_id]
@@ -193,10 +213,16 @@ def run_workflow(
 
         if any_failed:
             state.nova_evacuation_status = "blocked"
-            state.nova_evacuation_detail = "one or more load balancer failovers failed"
+            failed_lbs = sorted({inst.lb_id for inst in amphora if inst.failover_status == "failed" and inst.lb_id})
+            state.nova_evacuation_detail = (
+                f"nova disabled but not evacuated; Amphora failover failed for {', '.join(failed_lbs[:4])}"
+                if failed_lbs else
+                "nova disabled but not evacuated; one or more load balancer failovers failed"
+            )
             ctx.abort("failover_lbs", "One or more LB failovers failed")
             return
         ctx.step_set("failover_lbs", StepStatus.SUCCESS, f"{len(lb_ids)} LB(s) failed over")
+        state.nova_evacuation_detail = "nova disabled; Amphora failover complete, waiting for host to empty"
 
     ctx.step_set("await_empty", StepStatus.RUNNING)
     deadline = time_module.time() + EMPTY_TIMEOUT
@@ -212,6 +238,7 @@ def run_workflow(
         if count >= 0:
             state.vm_count = max(0, count - (state.amphora_count or 0))
             state.amphora_count = state.amphora_count
+            state.nova_evacuation_detail = f"nova disabled; {count} instance(s) still remain on host"
         update_cb()
         if count == 0:
             state.vm_count = 0
@@ -219,9 +246,11 @@ def run_workflow(
             break
         time_module.sleep(POLL_INTERVAL)
     else:
+        remaining_names = _remaining_instance_names(openstack_ops, state.hypervisor, auth=openstack_auth)
+        remaining_suffix = f" ({', '.join(remaining_names[:5])}{' +more' if len(remaining_names) > 5 else ''})" if remaining_names else ""
         state.nova_evacuation_status = "blocked"
-        state.nova_evacuation_detail = f"timeout with {count} instance(s) still present"
-        ctx.abort("await_empty", f"Timeout — {count} instance(s) still present")
+        state.nova_evacuation_detail = f"nova disabled but not evacuated; {count} instance(s) remain{remaining_suffix}"
+        ctx.abort("await_empty", f"Timeout — {count} instance(s) still present{remaining_suffix}")
         return
 
     ctx.step_set("await_empty", StepStatus.SUCCESS, "Hypervisor empty")

@@ -554,6 +554,18 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="action-confirm-overlay">
+  <div class="modal-box action-confirm-box">
+    <h2 id="action-confirm-title">Confirm Action</h2>
+    <div class="modal-node" id="action-confirm-node"></div>
+    <div id="action-confirm-body" class="action-confirm-body"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeActionConfirm()">Cancel</button>
+      <button class="btn primary" id="action-confirm-submit" onclick="confirmAction()">Continue</button>
+    </div>
+  </div>
+</div>
+
 <div class="api-issues-overlay" id="project-clone-overlay" onclick="if (event.target === this) closeProjectClonePlanner()">
   <div id="project-clone-overlay-content"></div>
 </div>

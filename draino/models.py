@@ -153,7 +153,7 @@ class NodeState:
         if self.compute_status != "disabled":
             return "clear"
         if (self.vm_count or 0) > 0 or (self.amphora_count or 0) > 0:
-            return "clear"
+            return "disabled"
         if self.nova_evacuation_status == "evacuated":
             return "evacuated"
         return "clear"

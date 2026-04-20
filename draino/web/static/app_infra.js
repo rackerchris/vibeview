@@ -206,6 +206,8 @@ function renderObjHeader(nd) {
       badges.push(`<span class="badge gray">Nova …</span>`);
     if (nd.nova_evacuation_status === 'evacuated')
       badges.push(`<span class="badge blue">Evacuated</span>`);
+    else if (nd.nova_evacuation_status === 'disabled')
+      badges.push(`<span class="badge yellow" title="${escAttr(nd.nova_evacuation_detail || 'Nova disabled but instances remain on host')}">Disabled, Not Evacuated</span>`);
     else if (nd.nova_evacuation_status === 'blocked')
       badges.push(`<span class="badge yellow" title="${escAttr(nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`);
     badges.push(`<span class="badge blue">Compute Node</span>`);
