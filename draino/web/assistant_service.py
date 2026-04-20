@@ -112,10 +112,19 @@ _RESOURCE_SUMMARY_INTENTS = {
     "kernel_version_summary",
     "kernel_drift_summary",
     "kubelet_drift_summary",
+    "container_runtime_drift_summary",
     "missing_node_agent_summary",
     "reboot_needed_summary",
     "node_attention_summary",
     "os_image_drift_summary",
+    "control_plane_runtime_summary",
+    "pod_density_summary",
+    "pvc_hotspot_summary",
+    "cpu_request_load_summary",
+    "memory_request_load_summary",
+    "namespace_spread_summary",
+    "not_ready_node_summary",
+    "cordoned_node_summary",
     "empty_compute_nodes_summary",
     "busiest_hypervisor_summary",
     "emptiest_hypervisor_summary",
@@ -287,6 +296,12 @@ _ENVIRONMENT_QUERY_TERMS = (
     "node",
     "nodes",
     "kernel",
+    "kubelet",
+    "runtime",
+    "container runtime",
+    "containerd",
+    "cri-o",
+    "docker",
     "ram",
     "memory",
     "cpu",
@@ -651,11 +666,67 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "resource_name": "mariadb",
             "needs_clarification": False,
         }
+    if _contains_any(lower, ("notready", "not ready", "unready")) and _contains_any(lower, ("nodes", "node")):
+        return {
+            "intent": "not_ready_node_summary",
+            "resource_kind": "environment",
+            "resource_name": "not_ready_nodes",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("cordoned", "unschedulable")) and _contains_any(lower, ("nodes", "node")):
+        return {
+            "intent": "cordoned_node_summary",
+            "resource_kind": "environment",
+            "resource_name": "cordoned_nodes",
+            "needs_clarification": False,
+        }
     if _contains_any(lower, ("nodes", "node")) and (signals["count"] or signals["alive"]) and _contains_any(lower, ("kubernetes", "cluster", "ready", "alive")):
         return {
             "intent": "node_ready_summary",
             "resource_kind": "cluster",
             "resource_name": "nodes",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("control plane", "control-plane")) and _contains_any(lower, ("healthy", "health", "runtime", "ready", "status")):
+        return {
+            "intent": "control_plane_runtime_summary",
+            "resource_kind": "environment",
+            "resource_name": "control_plane_runtime",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("pods", "pod", "pod density", "pod-dense")) and _contains_any(lower, ("density", "densest", "most packed", "most pods", "highest")):
+        return {
+            "intent": "pod_density_summary",
+            "resource_kind": "environment",
+            "resource_name": "pod_density",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("cpu requests", "cpu request", "requested cpu", "cpu load")) and _contains_any(lower, ("highest", "most", "load", "pressure", "heaviest")):
+        return {
+            "intent": "cpu_request_load_summary",
+            "resource_kind": "environment",
+            "resource_name": "cpu_request_load",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("memory requests", "memory request", "requested memory", "memory load")) and _contains_any(lower, ("highest", "most", "load", "pressure", "heaviest")):
+        return {
+            "intent": "memory_request_load_summary",
+            "resource_kind": "environment",
+            "resource_name": "memory_request_load",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("namespaces", "namespace spread", "namespace density")) and _contains_any(lower, ("most", "highest", "widest", "spread")):
+        return {
+            "intent": "namespace_spread_summary",
+            "resource_kind": "environment",
+            "resource_name": "namespace_spread",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("pvc", "pvcs", "persistent volume", "persistent volumes", "storage-backed", "pvc-backed")) and _contains_any(lower, ("hotspot", "concentration", "most", "highest", "densest")):
+        return {
+            "intent": "pvc_hotspot_summary",
+            "resource_kind": "environment",
+            "resource_name": "pvc_hotspot",
             "needs_clarification": False,
         }
     if _contains_any(lower, ("api server", "apiserver", "api servers")) and (signals["count"] or signals["alive"] or signals["status"]):
@@ -714,6 +785,13 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "intent": "kubelet_drift_summary",
             "resource_kind": "environment",
             "resource_name": "kubelet_drift",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("container runtime", "runtime", "containerd", "cri-o", "docker")) and _contains_any(lower, ("drift", "different", "mismatch", "versions", "version")):
+        return {
+            "intent": "container_runtime_drift_summary",
+            "resource_kind": "environment",
+            "resource_name": "container_runtime_drift",
             "needs_clarification": False,
         }
     if _contains_any(lower, ("node agent", "node-agent", "agent")) and _contains_any(lower, ("missing", "without", "no ", "not reporting", "not ready", "unavailable")):
@@ -1054,7 +1132,7 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
         "instance_project, instance_ips, instance_networks, project_network_summary, project_storage_summary, "
         "security_group_audit, security_group_lockdown_suggestions, security_group_insecure_check, "
         "etcd_health_summary, mariadb_node_summary, cluster_health_overview, node_ready_summary, control_plane_component_summary, "
-        "kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, missing_node_agent_summary, reboot_needed_summary, node_attention_summary, os_image_drift_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, "
+        "kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, container_runtime_drift_summary, missing_node_agent_summary, reboot_needed_summary, node_attention_summary, os_image_drift_summary, control_plane_runtime_summary, pod_density_summary, pvc_hotspot_summary, cpu_request_load_summary, memory_request_load_summary, namespace_spread_summary, not_ready_node_summary, cordoned_node_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, "
         "port_attachment_status, port_public_exposure, router_external_status, router_connectivity_summary, "
         "volume_attachment_summary, volume_posture, floating_ip_instance_status, floating_ip_lookup_by_fixed_ip, floating_ip_idle_status, "
         "open_resource, unknown. "
@@ -1122,12 +1200,12 @@ def _parse_environment_query_with_provider(query: str, fallback: dict[str, Any] 
     )
     system_prompt = (
         "Classify environment and fleet questions into JSON only. "
-        "Allowed intents: kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, missing_node_agent_summary, reboot_needed_summary, "
-        "node_attention_summary, os_image_drift_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, unknown. "
+        "Allowed intents: kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, container_runtime_drift_summary, missing_node_agent_summary, reboot_needed_summary, "
+        "node_attention_summary, os_image_drift_summary, control_plane_runtime_summary, pod_density_summary, pvc_hotspot_summary, cpu_request_load_summary, memory_request_load_summary, namespace_spread_summary, not_ready_node_summary, cordoned_node_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, unknown. "
         "Map freeform wording about environment-wide compute, host, node, hypervisor, kernel, RAM, reboot, VM density, or missing agents "
         "to the closest supported intent. "
         "Return keys: intent, resource_kind, resource_name, needs_clarification, clarifying_question, top_n. "
-        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, kernel_drift, kubelet_drift, node_agent, reboot, node_attention, os_image_drift, compute_empty, hypervisor_load, hypervisor_empty, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
+        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, kernel_drift, kubelet_drift, container_runtime_drift, node_agent, reboot, node_attention, os_image_drift, control_plane_runtime, pod_density, pvc_hotspot, cpu_request_load, memory_request_load, namespace_spread, not_ready_nodes, cordoned_nodes, compute_empty, hypervisor_load, hypervisor_empty, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
         "Never include markdown."
     )
     user_prompt = json.dumps({"query": query})
@@ -1774,15 +1852,29 @@ def answer_assistant_query(
         "cluster_health_overview",
         "node_ready_summary",
         "control_plane_component_summary",
+        "control_plane_runtime_summary",
+        "pod_density_summary",
+        "pvc_hotspot_summary",
+        "cpu_request_load_summary",
+        "memory_request_load_summary",
+        "namespace_spread_summary",
+        "not_ready_node_summary",
+        "cordoned_node_summary",
         "kernel_version_summary",
+        "kernel_drift_summary",
+        "kubelet_drift_summary",
+        "container_runtime_drift_summary",
         "missing_node_agent_summary",
         "reboot_needed_summary",
+        "node_attention_summary",
+        "os_image_drift_summary",
         "empty_compute_nodes_summary",
         "busiest_hypervisor_summary",
         "emptiest_hypervisor_summary",
         "highest_ram_hypervisor_summary",
         "highest_cpu_hypervisor_summary",
         "highest_disk_hypervisor_summary",
+        "hypervisor_metric_top_n",
     }:
         
         project_context = _default_project_context(auth, selected_project_id)

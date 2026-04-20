@@ -88,6 +88,49 @@ def _collect_k8s_node_version_facts(k8s_auth=None) -> tuple[list[dict[str, Any]]
     return facts, []
 
 
+def _pct(numerator: Any, denominator: Any) -> float | None:
+    try:
+        num = float(numerator)
+        den = float(denominator)
+        if den <= 0:
+            return None
+        return round((num / den) * 100.0, 1)
+    except Exception:
+        return None
+
+
+def _collect_k8s_density_facts(k8s_auth=None) -> tuple[list[dict[str, Any]], list[str]]:
+    summary = k8s_ops.get_k8s_node_health_density_summary(auth=k8s_auth)
+    error = str(summary.get("error") or "").strip()
+    facts: list[dict[str, Any]] = []
+    for item in list(summary.get("nodes") or []):
+        pod_count = int(item.get("pod_count") or 0)
+        pods_allocatable = item.get("pods_allocatable")
+        cpu_requests_mcpu = int(item.get("cpu_requests_mcpu") or 0)
+        cpu_allocatable_mcpu = int(item.get("cpu_allocatable_mcpu") or 0) if item.get("cpu_allocatable_mcpu") is not None else None
+        memory_requests_mib = int(item.get("memory_requests_mib") or 0)
+        memory_allocatable_mib = int(item.get("memory_allocatable_mib") or 0) if item.get("memory_allocatable_mib") is not None else None
+        facts.append({
+            "name": str(item.get("node") or ""),
+            "pod_count": pod_count,
+            "pods_allocatable": pods_allocatable,
+            "pods_pct": _pct(pod_count, pods_allocatable),
+            "cpu_requests_mcpu": cpu_requests_mcpu,
+            "cpu_allocatable_mcpu": cpu_allocatable_mcpu,
+            "cpu_req_pct": _pct(cpu_requests_mcpu, cpu_allocatable_mcpu),
+            "memory_requests_mib": memory_requests_mib,
+            "memory_allocatable_mib": memory_allocatable_mib,
+            "memory_req_pct": _pct(memory_requests_mib, memory_allocatable_mib),
+            "pvc_pod_count": int(item.get("pvc_pod_count") or 0),
+            "pvc_claim_count": int(item.get("pvc_claim_count") or 0),
+            "namespace_count": int(item.get("namespace_count") or 0),
+            "ready": bool(item.get("ready")),
+            "cordoned": bool(item.get("cordoned")),
+            "conditions": list(item.get("conditions") or []),
+        })
+    return facts, ([error] if error else [])
+
+
 def _collect_node_agent_facts(k8s_auth=None) -> tuple[list[dict[str, Any]], str]:
     nodes = k8s_ops.get_nodes(auth=k8s_auth)
     error = ""
@@ -694,6 +737,385 @@ def answer_node_attention_summary(openstack_auth=None, k8s_auth=None) -> dict[st
     }
 
 
+def answer_container_runtime_drift_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_node_version_facts(k8s_auth=k8s_auth)
+    runtimes = sorted({fact["container_runtime"] for fact in facts if fact["container_runtime"]})
+    if not runtimes:
+        return {
+            "intent": "container_runtime_drift_summary",
+            "answer": "I could not determine container runtime versions from the current node inventory.",
+            "confidence": 0.45,
+            "entities": [{"kind": "environment", "id": "container_runtime_drift", "label": "container runtime drift"}],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node inventory",
+        }
+    counts: dict[str, int] = {}
+    for fact in facts:
+        runtime = fact["container_runtime"] or "unknown"
+        counts[runtime] = counts.get(runtime, 0) + 1
+    majority_runtime = max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+    drift = sorted(
+        (fact for fact in facts if fact["container_runtime"] and fact["container_runtime"] != majority_runtime),
+        key=lambda fact: fact["name"],
+    )
+    answer_lines = [f"Nodes on a non-majority container runtime: {len(drift)}", "", f"- Majority runtime: `{majority_runtime}`"]
+    if drift:
+        for fact in drift[:10]:
+            answer_lines.append(f"- `{fact['name']}`: `{fact['container_runtime']}`")
+        if len(drift) > 10:
+            answer_lines.append(f"- and {len(drift) - 10} more")
+    findings = []
+    if drift:
+        findings.append("Container runtime drift nodes\n" + "\n".join(f"- {fact['name']} ({fact['container_runtime']})" for fact in drift[:10]))
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "container_runtime_drift_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.86 if not errors else 0.66,
+        "entities": [{"kind": "environment", "id": "container_runtime_drift", "label": "container runtime drift"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"majority_runtime": majority_runtime, "drift_count": len(drift), "node_total": len(facts)},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node inventory",
+    }
+
+
+def answer_control_plane_runtime_summary(k8s_auth=None) -> dict[str, Any]:
+    pods = k8s_ops.list_k8s_pods("kube-system", auth=k8s_auth)
+    prefixes = ("kube-apiserver", "kube-scheduler", "kube-controller-manager", "etcd")
+    matching = [pod for pod in pods if any(str(pod.get("name") or "").startswith(prefix) for prefix in prefixes)]
+    total = len(matching)
+    running = sum(1 for pod in matching if str(pod.get("phase") or "").strip().lower() == "running")
+    ready = 0
+    unhealthy: list[str] = []
+    for pod in matching:
+        ready_text = str(pod.get("ready") or "").strip()
+        if "/" in ready_text:
+            left, right = ready_text.split("/", 1)
+            try:
+                if int(left) >= int(right) > 0:
+                    ready += 1
+                else:
+                    unhealthy.append(f"{pod.get('name')}: phase {pod.get('phase')}, ready {ready_text}")
+            except Exception:
+                unhealthy.append(f"{pod.get('name')}: phase {pod.get('phase')}, ready {ready_text}")
+        else:
+            unhealthy.append(f"{pod.get('name')}: phase {pod.get('phase')}, ready {ready_text or 'unknown'}")
+    answer = f"{ready} of {total} tracked control-plane pods are fully ready in kube-system."
+    findings = unhealthy[:4]
+    return {
+        "intent": "control_plane_runtime_summary",
+        "answer": answer,
+        "confidence": 0.9 if total else 0.55,
+        "entities": [{"kind": "cluster", "id": "control_plane_runtime", "label": "control plane runtime"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"pod_total": total, "pod_running": running, "pod_ready": ready},
+        "answer_source": "local",
+        "mode": "grounded_cluster_health",
+        "provenance": "Grounded Kubernetes pod inventory",
+    }
+
+
+def answer_pod_density_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_density_facts(k8s_auth=k8s_auth)
+    ranked = sorted(
+        (fact for fact in facts if fact["pod_count"] > 0),
+        key=lambda fact: (-(fact["pods_pct"] or -1), -int(fact["pod_count"]), fact["name"]),
+    )
+    if not ranked:
+        return {
+            "intent": "pod_density_summary",
+            "answer": "I could not determine any running pod density from the current Kubernetes node inventory.",
+            "confidence": 0.45,
+            "entities": [{"kind": "environment", "id": "pod_density", "label": "pod density"}],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        }
+    top = ranked[0]
+    pct_text = f"{top['pods_pct']}%" if top.get("pods_pct") is not None else "unknown density"
+    answer_lines = [
+        f"The Kubernetes node with the highest pod density is `{top['name']}` at `{pct_text}` with `{top['pod_count']}` running pods."
+    ]
+    findings = [
+        "Top nodes by pod density\n" + "\n".join(
+            f"- {fact['name']} ({fact['pods_pct']}%, {fact['pod_count']} pods)"
+            if fact.get("pods_pct") is not None else f"- {fact['name']} ({fact['pod_count']} pods)"
+            for fact in ranked[:5]
+        )
+    ]
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "pod_density_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.86 if not errors else 0.66,
+        "entities": [{"kind": "environment", "id": "pod_density", "label": "pod density"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"top_node": top["name"], "top_pods_pct": top.get("pods_pct"), "top_pod_count": top["pod_count"]},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node density data",
+    }
+
+
+def answer_pvc_hotspot_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_density_facts(k8s_auth=k8s_auth)
+    ranked = sorted(
+        (fact for fact in facts if fact["pvc_pod_count"] > 0),
+        key=lambda fact: (-int(fact["pvc_pod_count"]), -int(fact["pvc_claim_count"]), fact["name"]),
+    )
+    if not ranked:
+        return {
+            "intent": "pvc_hotspot_summary",
+            "answer": "I could not find any nodes currently hosting PVC-backed workloads.",
+            "confidence": 0.55,
+            "entities": [{"kind": "environment", "id": "pvc_hotspot", "label": "PVC hotspot"}],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        }
+    top = ranked[0]
+    answer_lines = [
+        f"The Kubernetes node with the highest PVC-backed workload concentration is `{top['name']}` with `{top['pvc_pod_count']}` PVC-backed pods across `{top['pvc_claim_count']}` claims."
+    ]
+    findings = [
+        "Top PVC workload hotspots\n" + "\n".join(
+            f"- {fact['name']} ({fact['pvc_pod_count']} PVC-backed pods, {fact['pvc_claim_count']} claims)"
+            for fact in ranked[:5]
+        )
+    ]
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "pvc_hotspot_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.86 if not errors else 0.66,
+        "entities": [{"kind": "environment", "id": "pvc_hotspot", "label": "PVC hotspot"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"top_node": top["name"], "top_pvc_pod_count": top["pvc_pod_count"], "top_pvc_claim_count": top["pvc_claim_count"]},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node density data",
+    }
+
+
+def answer_cpu_request_load_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_density_facts(k8s_auth=k8s_auth)
+    ranked = sorted(
+        (fact for fact in facts if fact.get("cpu_req_pct") is not None),
+        key=lambda fact: (-(fact["cpu_req_pct"] or -1), -int(fact["cpu_requests_mcpu"]), fact["name"]),
+    )
+    if not ranked:
+        return {
+            "intent": "cpu_request_load_summary",
+            "answer": "I could not determine Kubernetes CPU request load from the current node density data.",
+            "confidence": 0.45,
+            "entities": [{"kind": "environment", "id": "cpu_request_load", "label": "CPU request load"}],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        }
+    top = ranked[0]
+    answer = (
+        f"The Kubernetes node with the highest CPU request load is `{top['name']}` at "
+        f"`{top['cpu_req_pct']}%` with `{top['cpu_requests_mcpu']} mCPU` requested."
+    )
+    findings = [
+        "Top nodes by CPU request load\n" + "\n".join(
+            f"- {fact['name']} ({fact['cpu_req_pct']}%, {fact['cpu_requests_mcpu']} mCPU)"
+            for fact in ranked[:5]
+        )
+    ]
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "cpu_request_load_summary",
+        "answer": answer,
+        "confidence": 0.86 if not errors else 0.66,
+        "entities": [{"kind": "environment", "id": "cpu_request_load", "label": "CPU request load"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"top_node": top["name"], "top_cpu_req_pct": top["cpu_req_pct"], "top_cpu_requests_mcpu": top["cpu_requests_mcpu"]},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node density data",
+    }
+
+
+def answer_memory_request_load_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_density_facts(k8s_auth=k8s_auth)
+    ranked = sorted(
+        (fact for fact in facts if fact.get("memory_req_pct") is not None),
+        key=lambda fact: (-(fact["memory_req_pct"] or -1), -int(fact["memory_requests_mib"]), fact["name"]),
+    )
+    if not ranked:
+        return {
+            "intent": "memory_request_load_summary",
+            "answer": "I could not determine Kubernetes memory request load from the current node density data.",
+            "confidence": 0.45,
+            "entities": [{"kind": "environment", "id": "memory_request_load", "label": "memory request load"}],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        }
+    top = ranked[0]
+    answer = (
+        f"The Kubernetes node with the highest memory request load is `{top['name']}` at "
+        f"`{top['memory_req_pct']}%` with `{top['memory_requests_mib']} MiB` requested."
+    )
+    findings = [
+        "Top nodes by memory request load\n" + "\n".join(
+            f"- {fact['name']} ({fact['memory_req_pct']}%, {fact['memory_requests_mib']} MiB)"
+            for fact in ranked[:5]
+        )
+    ]
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "memory_request_load_summary",
+        "answer": answer,
+        "confidence": 0.86 if not errors else 0.66,
+        "entities": [{"kind": "environment", "id": "memory_request_load", "label": "memory request load"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"top_node": top["name"], "top_memory_req_pct": top["memory_req_pct"], "top_memory_requests_mib": top["memory_requests_mib"]},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node density data",
+    }
+
+
+def answer_namespace_spread_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_density_facts(k8s_auth=k8s_auth)
+    ranked = sorted(
+        (fact for fact in facts if int(fact["namespace_count"]) > 0),
+        key=lambda fact: (-int(fact["namespace_count"]), -int(fact["pod_count"]), fact["name"]),
+    )
+    if not ranked:
+        return {
+            "intent": "namespace_spread_summary",
+            "answer": "I could not determine namespace spread from the current Kubernetes node density data.",
+            "confidence": 0.45,
+            "entities": [{"kind": "environment", "id": "namespace_spread", "label": "namespace spread"}],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        }
+    top = ranked[0]
+    answer = (
+        f"The Kubernetes node hosting workloads from the most namespaces is `{top['name']}` with "
+        f"`{top['namespace_count']}` namespaces and `{top['pod_count']}` running pods."
+    )
+    findings = [
+        "Top nodes by namespace spread\n" + "\n".join(
+            f"- {fact['name']} ({fact['namespace_count']} namespaces, {fact['pod_count']} pods)"
+            for fact in ranked[:5]
+        )
+    ]
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "namespace_spread_summary",
+        "answer": answer,
+        "confidence": 0.86 if not errors else 0.66,
+        "entities": [{"kind": "environment", "id": "namespace_spread", "label": "namespace spread"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"top_node": top["name"], "top_namespace_count": top["namespace_count"], "top_pod_count": top["pod_count"]},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node density data",
+    }
+
+
+def answer_not_ready_node_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_density_facts(k8s_auth=k8s_auth)
+    flagged = sorted((fact for fact in facts if not fact.get("ready")), key=lambda fact: fact["name"])
+    answer_lines = [f"Kubernetes nodes that are NotReady: {len(flagged)}"]
+    if flagged:
+        answer_lines.append("")
+        for fact in flagged[:10]:
+            conds = ", ".join(fact.get("conditions") or []) or "no extra conditions reported"
+            answer_lines.append(f"- `{fact['name']}`: {conds}")
+        if len(flagged) > 10:
+            answer_lines.append(f"- and {len(flagged) - 10} more")
+    findings = []
+    if flagged:
+        findings.append("NotReady nodes\n" + "\n".join(f"- {fact['name']}" for fact in flagged[:10]))
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "not_ready_node_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.9 if not errors else 0.7,
+        "entities": [{"kind": "environment", "id": "not_ready_nodes", "label": "NotReady nodes"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"not_ready_count": len(flagged), "node_total": len(facts)},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node density data",
+    }
+
+
+def answer_cordoned_node_summary(k8s_auth=None) -> dict[str, Any]:
+    facts, errors = _collect_k8s_density_facts(k8s_auth=k8s_auth)
+    flagged = sorted((fact for fact in facts if fact.get("cordoned")), key=lambda fact: fact["name"])
+    answer_lines = [f"Kubernetes nodes that are cordoned: {len(flagged)}"]
+    if flagged:
+        answer_lines.append("")
+        for fact in flagged[:10]:
+            answer_lines.append(f"- `{fact['name']}`: `{fact['pod_count']}` running pods")
+        if len(flagged) > 10:
+            answer_lines.append(f"- and {len(flagged) - 10} more")
+    findings = []
+    if flagged:
+        findings.append("Cordoned nodes\n" + "\n".join(f"- {fact['name']}" for fact in flagged[:10]))
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "cordoned_node_summary",
+        "answer": "\n".join(answer_lines),
+        "confidence": 0.9 if not errors else 0.7,
+        "entities": [{"kind": "environment", "id": "cordoned_nodes", "label": "cordoned nodes"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {"cordoned_count": len(flagged), "node_total": len(facts)},
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes node density data",
+    }
+
+
 def answer_hypervisor_metric_summary(intent: str, openstack_auth=None, k8s_auth=None) -> dict[str, Any] | None:
     config = HYPERVISOR_METRIC_SUMMARIES.get(str(intent or "").strip())
     if config is None:
@@ -823,6 +1245,15 @@ ENVIRONMENT_SUMMARY_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
     "reboot_needed_summary": answer_reboot_needed_summary,
     "node_attention_summary": answer_node_attention_summary,
     "os_image_drift_summary": answer_os_image_drift_summary,
+    "container_runtime_drift_summary": answer_container_runtime_drift_summary,
+    "control_plane_runtime_summary": answer_control_plane_runtime_summary,
+    "pod_density_summary": answer_pod_density_summary,
+    "pvc_hotspot_summary": answer_pvc_hotspot_summary,
+    "cpu_request_load_summary": answer_cpu_request_load_summary,
+    "memory_request_load_summary": answer_memory_request_load_summary,
+    "namespace_spread_summary": answer_namespace_spread_summary,
+    "not_ready_node_summary": answer_not_ready_node_summary,
+    "cordoned_node_summary": answer_cordoned_node_summary,
     "empty_compute_nodes_summary": answer_empty_compute_nodes_summary,
     **{intent: answer_hypervisor_metric_summary for intent in HYPERVISOR_METRIC_SUMMARIES},
 }
@@ -837,6 +1268,6 @@ def answer_environment_summary(intent: str, openstack_auth=None, k8s_auth=None) 
         return None
     if intent in HYPERVISOR_METRIC_SUMMARIES:
         return handler(intent, openstack_auth=openstack_auth, k8s_auth=k8s_auth)
-    if intent in {"kernel_version_summary", "kernel_drift_summary", "kubelet_drift_summary", "missing_node_agent_summary", "os_image_drift_summary"}:
+    if intent in {"kernel_version_summary", "kernel_drift_summary", "kubelet_drift_summary", "missing_node_agent_summary", "os_image_drift_summary", "container_runtime_drift_summary", "control_plane_runtime_summary", "pod_density_summary", "pvc_hotspot_summary", "cpu_request_load_summary", "memory_request_load_summary", "namespace_spread_summary", "not_ready_node_summary", "cordoned_node_summary"}:
         return handler(k8s_auth=k8s_auth)
     return handler(openstack_auth=openstack_auth, k8s_auth=k8s_auth)

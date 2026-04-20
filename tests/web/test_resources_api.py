@@ -1959,6 +1959,250 @@ def test_assistant_service_answers_os_image_drift_summary(monkeypatch):
     assert result["answer_source"] == "local"
 
 
+def test_assistant_service_answers_container_runtime_drift_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for container runtime drift questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "container_runtime": "containerd://1.7.20"},
+            {"name": "cmp-2", "hostname": "cmp-2", "container_runtime": "containerd://1.7.20"},
+            {"name": "cmp-3", "hostname": "cmp-3", "container_runtime": "containerd://2.0.0"},
+        ],
+    )
+
+    result = assistant_service.answer_assistant_query("do we have container runtime version drift?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "container_runtime_drift_summary"
+    assert "Nodes on a non-majority container runtime: 1" in result["answer"]
+    assert "`cmp-3`" in result["answer"]
+    assert "containerd://2.0.0" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_control_plane_runtime_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for control plane runtime questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "list_k8s_pods",
+        lambda namespace, auth=None: [
+            {"name": "kube-apiserver-cp-1", "phase": "Running", "ready": "1/1"},
+            {"name": "kube-scheduler-cp-1", "phase": "Running", "ready": "1/1"},
+            {"name": "kube-controller-manager-cp-1", "phase": "Running", "ready": "0/1"},
+            {"name": "etcd-cp-1", "phase": "Pending", "ready": "0/1"},
+        ],
+    )
+
+    result = assistant_service.answer_assistant_query("is the control plane healthy right now?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "control_plane_runtime_summary"
+    assert "2 of 4 tracked control-plane pods are fully ready" in result["answer"]
+    assert any("kube-controller-manager-cp-1" in item for item in (result.get("findings") or []))
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_pod_density_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for pod density questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "pvc_pod_count": 8, "pvc_claim_count": 10, "namespace_count": 12, "ready": True},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "pvc_pod_count": 4, "pvc_claim_count": 5, "namespace_count": 10, "ready": True},
+                {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "pvc_pod_count": 14, "pvc_claim_count": 18, "namespace_count": 7, "ready": True},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which kubernetes node has the highest pod density?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "pod_density_summary"
+    assert "`cmp-2`" in result["answer"]
+    assert "`87.5%`" in result["answer"]
+    assert "`140`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_pvc_hotspot_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for pvc hotspot questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "pvc_pod_count": 8, "pvc_claim_count": 10, "namespace_count": 12, "ready": True},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "pvc_pod_count": 4, "pvc_claim_count": 5, "namespace_count": 10, "ready": True},
+                {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "pvc_pod_count": 14, "pvc_claim_count": 18, "namespace_count": 7, "ready": True},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes have the most pvc-backed workloads?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "pvc_hotspot_summary"
+    assert "`cmp-3`" in result["answer"]
+    assert "`14`" in result["answer"]
+    assert "`18`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_cpu_request_load_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for cpu request load questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "cpu_requests_mcpu": 42000, "cpu_allocatable_mcpu": 64000, "pvc_pod_count": 8, "pvc_claim_count": 10, "namespace_count": 12, "ready": True},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "cpu_requests_mcpu": 58000, "cpu_allocatable_mcpu": 64000, "pvc_pod_count": 4, "pvc_claim_count": 5, "namespace_count": 10, "ready": True},
+                {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "cpu_requests_mcpu": 21000, "cpu_allocatable_mcpu": 64000, "pvc_pod_count": 14, "pvc_claim_count": 18, "namespace_count": 7, "ready": True},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which kubernetes node has the highest cpu request load?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "cpu_request_load_summary"
+    assert "`cmp-2`" in result["answer"]
+    assert "`90.6%`" in result["answer"]
+    assert "`58000 mCPU`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_namespace_spread_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for namespace spread questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "namespace_count": 12, "pvc_pod_count": 8, "pvc_claim_count": 10, "ready": True},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "namespace_count": 18, "pvc_pod_count": 4, "pvc_claim_count": 5, "ready": True},
+                {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "namespace_count": 7, "pvc_pod_count": 14, "pvc_claim_count": 18, "ready": True},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which kubernetes node is hosting workloads from the most namespaces?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "namespace_spread_summary"
+    assert "`cmp-2`" in result["answer"]
+    assert "`18`" in result["answer"]
+    assert "`140`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_memory_request_load_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for memory request load questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "memory_requests_mib": 131072, "memory_allocatable_mib": 262144, "namespace_count": 12, "ready": True},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "memory_requests_mib": 245760, "memory_allocatable_mib": 262144, "namespace_count": 10, "ready": True},
+                {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "memory_requests_mib": 65536, "memory_allocatable_mib": 262144, "namespace_count": 7, "ready": True},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which kubernetes node has the highest memory request load?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "memory_request_load_summary"
+    assert "`cmp-2`" in result["answer"]
+    assert "`93.8%`" in result["answer"]
+    assert "`245760 MiB`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_not_ready_node_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for not-ready node questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "ready": True, "cordoned": False, "conditions": []},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "ready": False, "cordoned": False, "conditions": ["MemoryPressure"]},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which kubernetes nodes are not ready?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "not_ready_node_summary"
+    assert "Kubernetes nodes that are NotReady: 1" in result["answer"]
+    assert "`cmp-2`" in result["answer"]
+    assert "MemoryPressure" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_cordoned_node_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for cordoned node questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "ready": True, "cordoned": True, "conditions": []},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "ready": False, "cordoned": False, "conditions": ["MemoryPressure"]},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which kubernetes nodes are cordoned?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "cordoned_node_summary"
+    assert "Kubernetes nodes that are cordoned: 1" in result["answer"]
+    assert "`cmp-1`" in result["answer"]
+    assert "`120`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
 def test_assistant_service_answers_node_attention_summary(monkeypatch):
     monkeypatch.setattr(
         assistant_service,
