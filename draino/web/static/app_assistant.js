@@ -51,6 +51,15 @@ async function submitAssistantQuery() {
   const query = String(assistantState.query || '').trim();
   if (!query || assistantState.loading) return;
   const requestStartedAt = performance.now();
+  const previousResult = assistantState.result ? {
+    intent: assistantState.result.intent || '',
+    mode: assistantState.result.mode || '',
+    scope: assistantState.result.scope || {},
+    findings: Array.isArray(assistantState.result.findings) ? assistantState.result.findings : [],
+    actions: Array.isArray(assistantState.result.actions) ? assistantState.result.actions : [],
+    entities: Array.isArray(assistantState.result.entities) ? assistantState.result.entities : [],
+    confidence: assistantState.result.confidence,
+  } : null;
   let firstEventLogged = false;
   let firstDeltaLogged = false;
   assistantState.loading = true;
@@ -65,6 +74,7 @@ async function submitAssistantQuery() {
       resolved_kind: assistantState.resolvedChoice?.kind || '',
       resolved_id: assistantState.resolvedChoice?.id || '',
       resolved_label: assistantState.resolvedChoice?.label || '',
+      previous_result: previousResult,
     };
     const resp = await fetch('/api/assistant/query/stream', {
       method: 'POST',
@@ -215,6 +225,11 @@ async function validateAssistantProvider() {
 
 function executeAssistantAction(action) {
   if (!action || typeof action !== 'object') return;
+  if (action.type === 'open_node' && action.node) {
+    switchView('infrastructure');
+    if (typeof selectNode === 'function') selectNode(String(action.node));
+    return;
+  }
   if (action.type === 'open_projects') {
     switchView('projects');
     return;

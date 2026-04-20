@@ -9,6 +9,7 @@ from draino.web.api import resources as resource_api
 from draino.web import assistant_evidence
 from draino.web import assistant_cluster_answers
 from draino.web import assistant_environment_answers
+from draino.web import assistant_followups
 from draino.web import assistant_service
 from draino.web import assistant_resource_answers
 from draino.web import resource_helpers
@@ -1318,6 +1319,7 @@ def test_assistant_service_answers_etcd_health_summary(monkeypatch):
     assert result["intent"] == "etcd_health_summary"
     assert "3 etcd nodes" in result["answer"]
     assert "2 are currently alive" in result["answer"]
+    assert [action["node"] for action in result["actions"]] == ["node-1", "node-2", "node-3"]
     assert result["answer_source"] == "local"
 
 
@@ -1337,6 +1339,7 @@ def test_assistant_service_answers_mariadb_node_summary(monkeypatch):
 
     assert result["intent"] == "mariadb_node_summary"
     assert "2 Kubernetes nodes currently hosting MariaDB cluster pods" in result["answer"]
+    assert [action["node"] for action in result["actions"]] == ["node-2", "node-3"]
     assert result["answer_source"] == "local"
 
 
@@ -1364,6 +1367,7 @@ def test_assistant_service_answers_cluster_health_overview(monkeypatch):
     assert result["intent"] == "cluster_health_overview"
     assert "2 of 3 Kubernetes nodes are Ready" in result["answer"]
     assert "NotReady" in " ".join(result.get("findings") or [])
+    assert result["actions"][0]["node"] == "node-3"
     assert result["answer_source"] == "local"
 
 
@@ -1388,6 +1392,7 @@ def test_assistant_service_answers_node_ready_summary(monkeypatch):
     assert result["intent"] == "node_ready_summary"
     assert "2 of 3 Kubernetes nodes are Ready" in result["answer"]
     assert "1 are currently cordoned" in result["answer"]
+    assert [action["node"] for action in result["actions"]] == ["node-2", "node-3"]
     assert result["answer_source"] == "local"
 
 
@@ -1579,6 +1584,8 @@ def test_assistant_service_answers_busiest_hypervisor_summary(monkeypatch):
     assert "`cmp-2`" in result["answer"]
     assert "`27`" in result["answer"]
     assert "Top hypervisors by running VMs" in " ".join(result.get("findings") or [])
+    assert result["actions"][0]["type"] == "open_node"
+    assert result["actions"][0]["node"] == "cmp-2"
     assert result["answer_source"] == "local"
 
 
@@ -1874,6 +1881,7 @@ def test_assistant_service_answers_top_n_busiest_hypervisors(monkeypatch):
     assert "Top 2 hypervisors by VM load" in result["answer"]
     assert "- `cmp-2`: `27`" in result["answer"]
     assert "- `cmp-1`: `11`" in result["answer"]
+    assert [action["node"] for action in result["actions"]] == ["cmp-2", "cmp-1"]
     assert result["answer_source"] == "local"
 
 
@@ -2005,6 +2013,10 @@ def test_assistant_service_answers_control_plane_runtime_summary(monkeypatch):
 
     assert result["intent"] == "control_plane_runtime_summary"
     assert "2 of 4 tracked control-plane pods are fully ready" in result["answer"]
+    assert "`1` API server" in result["answer"]
+    assert "`1` scheduler" in result["answer"]
+    assert "`1` controller-manager" in result["answer"]
+    assert "`1` etcd" in result["answer"]
     assert any("kube-controller-manager-cp-1" in item for item in (result.get("findings") or []))
     assert result["answer_source"] == "local"
 
@@ -2034,6 +2046,8 @@ def test_assistant_service_answers_pod_density_summary(monkeypatch):
     assert "`cmp-2`" in result["answer"]
     assert "`87.5%`" in result["answer"]
     assert "`140`" in result["answer"]
+    assert "`10` namespaces" in result["answer"]
+    assert result["actions"][0]["node"] == "cmp-2"
     assert result["answer_source"] == "local"
 
 
@@ -2062,6 +2076,7 @@ def test_assistant_service_answers_pvc_hotspot_summary(monkeypatch):
     assert "`cmp-3`" in result["answer"]
     assert "`14`" in result["answer"]
     assert "`18`" in result["answer"]
+    assert "`60` running pods" in result["answer"]
     assert result["answer_source"] == "local"
 
 
@@ -2090,6 +2105,7 @@ def test_assistant_service_answers_cpu_request_load_summary(monkeypatch):
     assert "`cmp-2`" in result["answer"]
     assert "`90.6%`" in result["answer"]
     assert "`58000 mCPU`" in result["answer"]
+    assert "`140` running pods" in result["answer"]
     assert result["answer_source"] == "local"
 
 
@@ -2118,6 +2134,7 @@ def test_assistant_service_answers_namespace_spread_summary(monkeypatch):
     assert "`cmp-2`" in result["answer"]
     assert "`18`" in result["answer"]
     assert "`140`" in result["answer"]
+    assert "`4` of those pods are PVC-backed" in result["answer"]
     assert result["answer_source"] == "local"
 
 
@@ -2146,6 +2163,8 @@ def test_assistant_service_answers_memory_request_load_summary(monkeypatch):
     assert "`cmp-2`" in result["answer"]
     assert "`93.8%`" in result["answer"]
     assert "`245760 MiB`" in result["answer"]
+    assert "`140` running pods" in result["answer"]
+    assert result["actions"][0]["node"] == "cmp-2"
     assert result["answer_source"] == "local"
 
 
@@ -2173,6 +2192,309 @@ def test_assistant_service_answers_not_ready_node_summary(monkeypatch):
     assert "Kubernetes nodes that are NotReady: 1" in result["answer"]
     assert "`cmp-2`" in result["answer"]
     assert "MemoryPressure" in result["answer"]
+    assert "`140` running pods" in result["answer"]
+    assert result["actions"][0]["node"] == "cmp-2"
+    assert result["answer_source"] == "local"
+
+
+def test_fallback_parser_routes_noschedule_nodes_to_grounded_summary():
+    parsed = assistant_service._parse_query_fallback("which nodes have the noschedule label?")
+
+    assert parsed["intent"] == "noschedule_node_summary"
+    assert parsed["resource_kind"] == "environment"
+    assert parsed["resource_name"] == "noschedule_nodes"
+
+
+def test_assistant_service_answers_noschedule_node_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for noschedule node questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {
+                "name": "cmp-1",
+                "hostname": "cmp-1",
+                "cordoned": False,
+                "taints": [{"key": "draino.openstack.org/maintenance", "value": "true", "effect": "NoSchedule"}],
+            },
+            {
+                "name": "cmp-2",
+                "hostname": "cmp-2",
+                "cordoned": False,
+                "taints": [{"key": "node.kubernetes.io/dedicated", "value": "storage", "effect": "NoSchedule"}],
+            },
+            {
+                "name": "cmp-3",
+                "hostname": "cmp-3",
+                "cordoned": False,
+                "taints": [],
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "namespace_count": 12, "pvc_pod_count": 8, "pvc_claim_count": 10, "ready": True, "cordoned": False, "conditions": []},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "namespace_count": 10, "pvc_pod_count": 4, "pvc_claim_count": 5, "ready": True, "cordoned": False, "conditions": []},
+                {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "namespace_count": 7, "pvc_pod_count": 0, "pvc_claim_count": 0, "ready": True, "cordoned": False, "conditions": []},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes have the noschedule label?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "noschedule_node_summary"
+    assert "Kubernetes nodes with a `NoSchedule` taint: 2" in result["answer"]
+    assert "not a native node label" in result["answer"]
+    assert "`cmp-1`" in result["answer"]
+    assert "`cmp-2`" in result["answer"]
+    assert "managed by VibeView" in result["answer"]
+    assert "`120` running pods" in result["answer"]
+    assert [action["node"] for action in result["actions"]] == ["cmp-1", "cmp-2"]
+    assert result["parser_source"] == "fallback"
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_followup_why(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for grounded follow-up questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"node": "cmp-1", "pod_count": 120, "pods_allocatable": 200, "namespace_count": 12, "pvc_pod_count": 8, "pvc_claim_count": 10, "ready": True, "cordoned": False, "conditions": []},
+                {"node": "cmp-2", "pod_count": 140, "pods_allocatable": 160, "namespace_count": 10, "pvc_pod_count": 4, "pvc_claim_count": 5, "ready": True, "cordoned": False, "conditions": []},
+                {"node": "cmp-3", "pod_count": 60, "pods_allocatable": 160, "namespace_count": 7, "pvc_pod_count": 14, "pvc_claim_count": 18, "ready": True, "cordoned": False, "conditions": []},
+            ],
+            "error": None,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "why?",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "pod_density_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_node": "cmp-2"},
+            "findings": ["Top nodes by pod density\n- cmp-2 (87.5%, 140 pods)\n- cmp-1 (60.0%, 120 pods)"],
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_why"
+    assert result["parser_source"] == "followup"
+    assert "Why:" in result["answer"]
+    assert "Top nodes by pod density" in result["answer"]
+    assert result["actions"][0]["node"] == "cmp-2"
+
+
+def test_assistant_service_answers_followup_show_top_n(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for grounded follow-up questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"memory_mb_used": 65536, "memory_mb": 131072, "running_vms": 11},
+            "cmp-2": {"memory_mb_used": 98304, "memory_mb": 131072, "running_vms": 9},
+            "cmp-3": {"memory_mb_used": 49152, "memory_mb": 131072, "running_vms": 6},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "show top 2",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "highest_ram_hypervisor_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_hypervisor": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_top_n"
+    assert result["parser_source"] == "followup"
+    assert "Top 2 hypervisors by RAM usage" in result["answer"]
+    assert "- `cmp-2`: `96.0 GiB`" in result["answer"]
+    assert "- `cmp-1`: `64.0 GiB`" in result["answer"]
+
+
+def test_assistant_service_answers_followup_problem(monkeypatch):
+    monkeypatch.setattr(
+        assistant_followups,
+        "answer_environment_summary",
+        lambda intent, auth=None, k8s_auth=None: {
+            "intent": "noschedule_node_summary",
+            "answer": "Kubernetes nodes with a `NoSchedule` taint: 2",
+            "confidence": 0.9,
+            "entities": [{"kind": "environment", "id": "noschedule_nodes", "label": "NoSchedule taints"}],
+            "actions": [{"type": "open_node", "node": "cmp-1", "label": "Open cmp-1"}],
+            "needs_clarification": False,
+            "findings": ["VibeView-managed NoSchedule taints\n- cmp-1\n- cmp-2"],
+            "scope": {"noschedule_count": 2, "managed_noschedule_count": 2, "node_total": 3},
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node taints",
+        },
+    )
+    result = assistant_service.answer_assistant_query(
+        "is that a problem?",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "noschedule_node_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"noschedule_count": 2, "managed_noschedule_count": 2, "node_total": 3},
+            "actions": [{"type": "open_node", "node": "cmp-1", "label": "Open cmp-1"}],
+        },
+    )
+
+    assert result["intent"] == "followup_problem"
+    assert result["parser_source"] == "followup"
+    assert "Not necessarily" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_followup_open_top(monkeypatch):
+    result = assistant_service.answer_assistant_query(
+        "open the top node",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "memory_request_load_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_node": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_open_top"
+    assert result["parser_source"] == "followup"
+    assert "Opening Open cmp-2." in result["answer"]
+    assert result["actions"][0]["node"] == "cmp-2"
+
+
+def test_assistant_service_answers_followup_compare_next(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for grounded follow-up questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"memory_mb_used": 65536, "memory_mb": 131072, "running_vms": 11},
+            "cmp-2": {"memory_mb_used": 98304, "memory_mb": 131072, "running_vms": 9},
+            "cmp-3": {"memory_mb_used": 49152, "memory_mb": 131072, "running_vms": 6},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "compare it to the next one",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "highest_ram_hypervisor_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"top_hypervisor": "cmp-2"},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_compare_next"
+    assert result["parser_source"] == "followup"
+    assert "Comparison against the next result:" in result["answer"]
+    assert "Top 2 hypervisors by RAM usage" in result["answer"]
+
+
+def test_assistant_service_answers_followup_unhealthy_only(monkeypatch):
+    monkeypatch.setattr(
+        assistant_followups,
+        "answer_environment_summary",
+        lambda intent, auth=None, k8s_auth=None: {
+            "intent": "not_ready_node_summary",
+            "answer": "Kubernetes nodes that are NotReady: 2",
+            "confidence": 0.9,
+            "entities": [{"kind": "environment", "id": "not_ready_nodes", "label": "NotReady nodes"}],
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+            "needs_clarification": False,
+            "findings": ["NotReady nodes\n- cmp-2\n- cmp-3"],
+            "scope": {"not_ready_count": 2, "node_total": 5},
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes node density data",
+        },
+    )
+    result = assistant_service.answer_assistant_query(
+        "show only the unhealthy ones",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "not_ready_node_summary",
+            "mode": "grounded_environment_summary",
+            "scope": {"not_ready_count": 2, "node_total": 5},
+            "actions": [{"type": "open_node", "node": "cmp-2", "label": "Open cmp-2"}],
+        },
+    )
+
+    assert result["intent"] == "followup_unhealthy_only"
+    assert result["parser_source"] == "followup"
+    assert "Only the unhealthy or flagged resources:" in result["answer"]
+    assert "NotReady nodes" in result["answer"]
+
+
+def test_assistant_service_answers_followup_changed(monkeypatch):
+    result = assistant_service.answer_assistant_query(
+        "what changed?",
+        auth=None,
+        k8s_auth=None,
+        previous_result={
+            "intent": "cluster_health_overview",
+            "mode": "grounded_cluster_health",
+            "scope": {"node_total": 3, "node_ready": 2},
+            "actions": [{"type": "open_node", "node": "node-3", "label": "Open node-3"}],
+        },
+    )
+
+    assert result["intent"] == "followup_changed"
+    assert result["parser_source"] == "followup"
+    assert "do not have a historical baseline" in result["answer"]
     assert result["answer_source"] == "local"
 
 
@@ -2200,6 +2522,7 @@ def test_assistant_service_answers_cordoned_node_summary(monkeypatch):
     assert "Kubernetes nodes that are cordoned: 1" in result["answer"]
     assert "`cmp-1`" in result["answer"]
     assert "`120`" in result["answer"]
+    assert result["actions"][0]["node"] == "cmp-1"
     assert result["answer_source"] == "local"
 
 
@@ -2247,6 +2570,7 @@ def test_assistant_service_answers_node_attention_summary(monkeypatch):
     assert "`cmp-1`" in result["answer"]
     assert "reboot required" in result["answer"]
     assert "node agent missing" in result["answer"]
+    assert result["actions"][0]["node"] == "cmp-1"
     assert result["answer_source"] == "local"
 
 

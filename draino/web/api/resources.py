@@ -141,21 +141,38 @@ async def api_assistant_query(request: Request):
     resolved_kind = str(payload.get("resolved_kind") or "").strip()
     resolved_id = str(payload.get("resolved_id") or "").strip()
     resolved_label = str(payload.get("resolved_label") or "").strip()
+    previous_result = payload.get("previous_result") if isinstance(payload.get("previous_result"), dict) else None
     if not query:
         return {"result": None, "error": "Query is required.", "api_issue": None}
     try:
-        data = await _run_assistant_with_timeout(
-            answer_assistant_query,
-            query,
-            session.server.openstack_auth,
-            session.server.k8s_auth,
-            selected_project_id,
-            selected_project_name,
-            active_view,
-            resolved_kind,
-            resolved_id,
-            resolved_label,
-        )
+        if previous_result is not None:
+            runner = partial(
+                answer_assistant_query,
+                query,
+                session.server.openstack_auth,
+                session.server.k8s_auth,
+                selected_project_id,
+                selected_project_name,
+                active_view,
+                resolved_kind,
+                resolved_id,
+                resolved_label,
+                previous_result=previous_result,
+            )
+            data = await _run_assistant_with_timeout(runner)
+        else:
+            data = await _run_assistant_with_timeout(
+                answer_assistant_query,
+                query,
+                session.server.openstack_auth,
+                session.server.k8s_auth,
+                selected_project_id,
+                selected_project_name,
+                active_view,
+                resolved_kind,
+                resolved_id,
+                resolved_label,
+            )
         return {"result": data, "error": None, "api_issue": None}
     except TimeoutError:
         return {
@@ -178,6 +195,7 @@ async def api_assistant_query_stream(request: Request):
     resolved_kind = str(payload.get("resolved_kind") or "").strip()
     resolved_id = str(payload.get("resolved_id") or "").strip()
     resolved_label = str(payload.get("resolved_label") or "").strip()
+    previous_result = payload.get("previous_result") if isinstance(payload.get("previous_result"), dict) else None
     if not query:
         return JSONResponse(status_code=400, content={"error": "Query is required.", "api_issue": None})
     _LOGGER.info("assistant stream start query=%r", query[:120])
@@ -203,6 +221,7 @@ async def api_assistant_query_stream(request: Request):
                     resolved_kind,
                     resolved_id,
                     resolved_label,
+                    **({"previous_result": previous_result} if previous_result is not None else {}),
                 ):
                     push(event)
             except Exception as exc:

@@ -6,6 +6,20 @@ from typing import Any
 from ..operations import k8s_ops
 
 
+def _node_actions(node_names: list[str] | tuple[str, ...], limit: int = 3) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_name in list(node_names or []):
+        name = str(raw_name or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        actions.append({"type": "open_node", "node": name, "label": f"Open {name}"})
+        if len(actions) >= max(1, int(limit or 1)):
+            break
+    return actions
+
+
 def _ready_fraction(pod: dict[str, Any]) -> tuple[int, int]:
     text = str(pod.get("ready") or "").strip()
     if "/" not in text:
@@ -65,7 +79,7 @@ def answer_etcd_health_summary(k8s_auth=None) -> dict[str, Any]:
         "answer": answer,
         "confidence": 0.92 if not unknown else 0.72,
         "entities": [{"kind": "cluster", "id": "etcd", "label": "etcd"}],
-        "actions": [],
+        "actions": _node_actions(etcd_names),
         "needs_clarification": False,
         "findings": findings,
         "scope": {"etcd_total": total, "etcd_alive": healthy, "etcd_unknown": unknown},
@@ -80,6 +94,11 @@ def answer_node_ready_summary(k8s_auth=None) -> dict[str, Any]:
     total = len(nodes)
     ready = sum(1 for item in nodes if item.get("ready") is True)
     cordoned = sum(1 for item in nodes if item.get("cordoned") is True)
+    priority_nodes = [
+        str(item.get("name") or "")
+        for item in nodes
+        if item.get("ready") is not True or item.get("cordoned") is True
+    ] or [str(item.get("name") or "") for item in nodes]
     answer = f"{ready} of {total} Kubernetes nodes are Ready."
     if cordoned:
         answer += f" {cordoned} are currently cordoned."
@@ -88,7 +107,7 @@ def answer_node_ready_summary(k8s_auth=None) -> dict[str, Any]:
         "answer": answer,
         "confidence": 0.94,
         "entities": [{"kind": "cluster", "id": "nodes", "label": "nodes"}],
-        "actions": [],
+        "actions": _node_actions(priority_nodes),
         "needs_clarification": False,
         "scope": {"node_total": total, "node_ready": ready, "node_cordoned": cordoned},
         "answer_source": "local",
@@ -111,7 +130,7 @@ def answer_mariadb_node_summary(k8s_auth=None) -> dict[str, Any]:
         "answer": answer,
         "confidence": confidence,
         "entities": [{"kind": "cluster", "id": "mariadb", "label": "MariaDB"}],
-        "actions": [],
+        "actions": _node_actions(names),
         "needs_clarification": False,
         "scope": {"mariadb_node_total": total},
         "answer_source": "local",
@@ -149,7 +168,18 @@ def answer_cluster_health_overview(k8s_auth=None) -> dict[str, Any]:
         "answer": answer,
         "confidence": 0.9 if total else 0.55,
         "entities": [{"kind": "cluster", "id": "cluster", "label": "cluster"}],
-        "actions": [],
+        "actions": _node_actions([
+            str(item.get("name") or "")
+            for item in nodes
+            if item.get("ready") is not True
+        ] + [
+            str(item.get("name") or "")
+            for item in nodes
+            if item.get("cordoned") is True
+        ] + [
+            str(item.get("name") or "")
+            for item in nodes
+        ]),
         "needs_clarification": False,
         "findings": findings[:3],
         "scope": {"node_total": total, "node_ready": ready, "node_not_ready": not_ready, "node_cordoned": cordoned},

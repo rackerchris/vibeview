@@ -57,6 +57,7 @@ from .assistant_synthesis import (
     stream_platform_knowledge,
     synthesize_network_diagnosis,
 )
+from .assistant_followups import answer_followup_query
 from ..operations import openstack_ops
 
 _ASSISTANT_BASE_URL = os.getenv("DRAINO_ASSISTANT_BASE_URL", "").strip()
@@ -125,6 +126,7 @@ _RESOURCE_SUMMARY_INTENTS = {
     "namespace_spread_summary",
     "not_ready_node_summary",
     "cordoned_node_summary",
+    "noschedule_node_summary",
     "empty_compute_nodes_summary",
     "busiest_hypervisor_summary",
     "emptiest_hypervisor_summary",
@@ -673,6 +675,13 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "resource_name": "not_ready_nodes",
             "needs_clarification": False,
         }
+    if _contains_any(lower, ("noschedule", "no schedule", "no-schedule")) and _contains_any(lower, ("nodes", "node", "label", "labels", "taint", "taints")):
+        return {
+            "intent": "noschedule_node_summary",
+            "resource_kind": "environment",
+            "resource_name": "noschedule_nodes",
+            "needs_clarification": False,
+        }
     if _contains_any(lower, ("cordoned", "unschedulable")) and _contains_any(lower, ("nodes", "node")):
         return {
             "intent": "cordoned_node_summary",
@@ -1132,7 +1141,7 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
         "instance_project, instance_ips, instance_networks, project_network_summary, project_storage_summary, "
         "security_group_audit, security_group_lockdown_suggestions, security_group_insecure_check, "
         "etcd_health_summary, mariadb_node_summary, cluster_health_overview, node_ready_summary, control_plane_component_summary, "
-        "kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, container_runtime_drift_summary, missing_node_agent_summary, reboot_needed_summary, node_attention_summary, os_image_drift_summary, control_plane_runtime_summary, pod_density_summary, pvc_hotspot_summary, cpu_request_load_summary, memory_request_load_summary, namespace_spread_summary, not_ready_node_summary, cordoned_node_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, "
+        "kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, container_runtime_drift_summary, missing_node_agent_summary, reboot_needed_summary, node_attention_summary, os_image_drift_summary, control_plane_runtime_summary, pod_density_summary, pvc_hotspot_summary, cpu_request_load_summary, memory_request_load_summary, namespace_spread_summary, not_ready_node_summary, cordoned_node_summary, noschedule_node_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, "
         "port_attachment_status, port_public_exposure, router_external_status, router_connectivity_summary, "
         "volume_attachment_summary, volume_posture, floating_ip_instance_status, floating_ip_lookup_by_fixed_ip, floating_ip_idle_status, "
         "open_resource, unknown. "
@@ -1201,11 +1210,11 @@ def _parse_environment_query_with_provider(query: str, fallback: dict[str, Any] 
     system_prompt = (
         "Classify environment and fleet questions into JSON only. "
         "Allowed intents: kernel_version_summary, kernel_drift_summary, kubelet_drift_summary, container_runtime_drift_summary, missing_node_agent_summary, reboot_needed_summary, "
-        "node_attention_summary, os_image_drift_summary, control_plane_runtime_summary, pod_density_summary, pvc_hotspot_summary, cpu_request_load_summary, memory_request_load_summary, namespace_spread_summary, not_ready_node_summary, cordoned_node_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, unknown. "
+        "node_attention_summary, os_image_drift_summary, control_plane_runtime_summary, pod_density_summary, pvc_hotspot_summary, cpu_request_load_summary, memory_request_load_summary, namespace_spread_summary, not_ready_node_summary, cordoned_node_summary, noschedule_node_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, emptiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, hypervisor_metric_top_n, unknown. "
         "Map freeform wording about environment-wide compute, host, node, hypervisor, kernel, RAM, reboot, VM density, or missing agents "
         "to the closest supported intent. "
         "Return keys: intent, resource_kind, resource_name, needs_clarification, clarifying_question, top_n. "
-        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, kernel_drift, kubelet_drift, container_runtime_drift, node_agent, reboot, node_attention, os_image_drift, control_plane_runtime, pod_density, pvc_hotspot, cpu_request_load, memory_request_load, namespace_spread, not_ready_nodes, cordoned_nodes, compute_empty, hypervisor_load, hypervisor_empty, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
+        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, kernel_drift, kubelet_drift, container_runtime_drift, node_agent, reboot, node_attention, os_image_drift, control_plane_runtime, pod_density, pvc_hotspot, cpu_request_load, memory_request_load, namespace_spread, not_ready_nodes, cordoned_nodes, noschedule_nodes, compute_empty, hypervisor_load, hypervisor_empty, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
         "Never include markdown."
     )
     user_prompt = json.dumps({"query": query})
@@ -1825,6 +1834,7 @@ def answer_assistant_query(
     resolved_kind: str = "",
     resolved_id: str = "",
     resolved_label: str = "",
+    previous_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     text = str(query or "").strip()
@@ -1838,6 +1848,17 @@ def answer_assistant_query(
             "needs_clarification": True,
             "timings": {"parse_ms": 0.0, "answer_ms": 0.0, "total_ms": 0.0},
         }
+    followup_started = time.perf_counter()
+    followup = answer_followup_query(text, previous_result, auth, k8s_auth)
+    if followup is not None:
+        followup["parser_source"] = "followup"
+        followup["provider_enabled"] = assistant_provider_enabled()
+        followup["timings"] = {
+            "parse_ms": 0.0,
+            "answer_ms": round((time.perf_counter() - followup_started) * 1000, 1),
+            "total_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+        return followup
     project_context = {
         "project_id": str(selected_project_id or "").strip(),
         "project_name": str(selected_project_name or "").strip(),
@@ -1860,6 +1881,7 @@ def answer_assistant_query(
         "namespace_spread_summary",
         "not_ready_node_summary",
         "cordoned_node_summary",
+        "noschedule_node_summary",
         "kernel_version_summary",
         "kernel_drift_summary",
         "kubelet_drift_summary",
@@ -2236,6 +2258,7 @@ def stream_assistant_query(
     resolved_kind: str = "",
     resolved_id: str = "",
     resolved_label: str = "",
+    previous_result: dict[str, Any] | None = None,
 ):
     started = time.perf_counter()
     text = str(query or "").strip()
@@ -2403,4 +2426,4 @@ def stream_assistant_query(
             },
         }
         return
-    yield {"type": "final", "result": answer_assistant_query(text, auth, k8s_auth, selected_project_id, selected_project_name, active_view, resolved_kind, resolved_id, resolved_label)}
+    yield {"type": "final", "result": answer_assistant_query(text, auth, k8s_auth, selected_project_id, selected_project_name, active_view, resolved_kind, resolved_id, resolved_label, previous_result)}
