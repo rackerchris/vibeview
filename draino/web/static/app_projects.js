@@ -16,6 +16,7 @@ const projectCloneState = {
   activeCloneLabel: '',
   trackedInstanceId: '',
   status: null,
+  statusPollError: '',
   message: '',
   tone: 'info',
 };
@@ -681,16 +682,20 @@ async function loadProjectCloneStatus(instanceId, force = false) {
     const resp = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/clone-status${qs}`);
     const json = await resp.json();
     projectCloneState.status = json.status || null;
+    projectCloneState.statusPollError = '';
     projectCloneState.trackedInstanceId = instanceId;
   } catch (err) {
-    projectCloneState.status = {
-      state: 'failed',
-      source_instance_id: instanceId,
-      step_key: 'status_error',
-      step_label: 'Status Poll Failed',
-      detail: 'Unable to refresh clone status from the server.',
-      error: String(err),
-    };
+    projectCloneState.statusPollError = String(err);
+    if (!projectCloneState.status) {
+      projectCloneState.status = {
+        state: 'running',
+        source_instance_id: instanceId,
+        step_key: 'status_pending',
+        step_label: 'Waiting For Status',
+        detail: 'Clone is still running, but the latest status refresh failed.',
+        error: null,
+      };
+    }
     projectCloneState.trackedInstanceId = instanceId;
   }
   const nextState = projectCloneStatusState();
@@ -749,7 +754,11 @@ function renderProjectCloneStatusCard() {
   const status = projectCloneState.status;
   if (!status || (!isProjectCloneActive() && !projectCloneState.trackedInstanceId)) return '';
   const state = String(status.state || (isProjectCloneActive() ? 'running' : 'unknown'));
-  const tone = state === 'failed' ? 'err-block' : state === 'completed' ? 'note' : 'subtle';
+  const panelClass = state === 'failed'
+    ? 'clone-activity-panel failed'
+    : state === 'completed'
+      ? 'clone-activity-panel completed'
+      : 'clone-activity-panel running';
   const sourceLabel = projectCloneState.activeCloneLabel || status.new_name || status.source_instance_id || 'clone';
   return `
     <div class="card" style="margin-bottom:10px">
@@ -758,11 +767,12 @@ function renderProjectCloneStatusCard() {
         <button class="btn" style="font-size:11px" onclick="openTrackedProjectCloneWorkflow()">Open Workflow</button>
       </div>
       <div class="card-body">
-        <div class="${tone}" style="padding:10px 12px">
+        <div class="${panelClass}">
           <div style="font-weight:700;margin-bottom:4px">${esc(sourceLabel)} · ${esc(status.step_label || (state === 'running' ? 'Clone Running' : 'Clone Status'))}</div>
           <div>${esc(status.detail || (isProjectCloneActive() ? 'Clone request is running.' : 'No clone detail available.'))}</div>
           <div style="margin-top:6px;font-size:11px;color:var(--dim)">State: ${esc(state)}</div>
           ${status.error ? `<div style="margin-top:6px;color:var(--red);font-size:11px">${esc(status.error)}</div>` : ''}
+          ${projectCloneState.statusPollError ? `<div style="margin-top:6px;color:var(--yellow);font-size:11px">Latest status refresh failed: ${esc(projectCloneState.statusPollError)}</div>` : ''}
         </div>
       </div>
     </div>
