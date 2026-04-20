@@ -994,6 +994,18 @@ body {
 .tree-item.warning:hover { background: #ffefc2; }
 .tree-item.warning.selected { background: #ffe08a; border-left-color: #f9a825; }
 .tree-item.warning .ti-name { color: #8d6e00; font-weight: 600; }
+.tree-item.maintenance-ready { background: #eef7ef; border-left-color: #2e7d32; }
+.tree-item.maintenance-ready:hover { background: #e1f1e3; }
+.tree-item.maintenance-ready.selected { background: #d2ead6; border-left-color: #2e7d32; }
+.tree-item.maintenance-ready .ti-name { color: #1b5e20; font-weight: 600; }
+.tree-item.maintenance-partial { background: #fff9ee; border-left-color: #f9a825; }
+.tree-item.maintenance-partial:hover { background: #fff1d8; }
+.tree-item.maintenance-partial.selected { background: #ffe7bf; border-left-color: #f9a825; }
+.tree-item.maintenance-partial .ti-name { color: #8d6e00; font-weight: 600; }
+.tree-item.maintenance-risk { background: #fff0f0; border-left-color: #c62828; }
+.tree-item.maintenance-risk:hover { background: #ffe3e3; }
+.tree-item.maintenance-risk.selected { background: #ffd4d4; border-left-color: #c62828; }
+.tree-item.maintenance-risk .ti-name { color: #8e0000; font-weight: 700; }
 .ti-ico    { font-size: 14px; flex-shrink: 0; }
 .ti-name   { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-meta {
@@ -1015,6 +1027,15 @@ body {
 .tree-dot.cyan    { background: #80deea; animation: pulse 1.2s ease-in-out infinite; }
 .tree-badge { font-size: 10px; padding: 1px 5px; border-radius: 8px; flex-shrink: 0; background: var(--blue-bg); color: var(--blue); font-weight: 500; }
 .tree-badge.warn { background: #fff8e1; color: #e65100; }
+.tree-badge.risk { background: #ffebee; color: #b71c1c; font-weight: 800; }
+.tree-badge.ready { background: #e8f5e9; color: #1b5e20; font-weight: 700; }
+.tree-badge.ready-strong {
+  background: #1b5e20;
+  color: #fff;
+  font-weight: 800;
+  border: 1px solid #003300;
+  box-shadow: 0 0 0 1px rgba(27, 94, 32, 0.18);
+}
 .tree-badge.etcd {
   background: #880e4f;
   color: #fff;
@@ -1038,6 +1059,8 @@ body {
 }
 .tree-badge.agg  { background: #e8f5e9; color: var(--green); font-weight: 400; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-badge.nosched { background: #ffebee; color: var(--red); font-weight: 700; }
+.tree-badge.count { background: #fff3e0; color: #ef6c00; font-weight: 700; }
+.tree-badge.amp { background: #ede7f6; color: #5e35b1; font-weight: 700; }
 .tree-badge.noagent {
   background: #b71c1c;
   color: #fff;

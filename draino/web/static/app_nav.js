@@ -477,6 +477,13 @@ function taintLabel(t) {
 function treeItemHtml(name, nd) {
   const sel = name === selectedNode ? ' selected' : '';
   const mismatch = nd.compute_missing_from_openstack ? ' warning' : '';
+  const maintenanceClass = nd.maintenance_ready
+    ? ' maintenance-ready'
+    : nd.k8s_drain_status === 'blocked' || nd.nova_evacuation_status === 'blocked'
+      ? ' maintenance-risk'
+      : nd.k8s_cordoned || nd.k8s_drain_status === 'drained' || nd.nova_evacuation_status === 'disabled'
+        ? ' maintenance-partial'
+        : '';
   const ico = nd.is_compute ? '🖥️' : nd.is_network ? '🌐' : nd.is_etcd ? '☣️' : '⚙️';
   const hintTxt = nd.is_compute
     ? NODE_HINTS.compute
@@ -494,21 +501,21 @@ function treeItemHtml(name, nd) {
   const edgeBdg = nd.is_edge ? `<span class="tree-badge edge">edge</span>` : '';
   const netBdg = nd.is_network ? `<span class="tree-badge blue">network</span>` : '';
   const noSched = noScheduleTaints(nd);
-  const cordonedBdg = nd.k8s_cordoned ? `<span class="tree-badge warn">CORDONED</span>` : '';
+  const cordonedBdg = nd.k8s_cordoned ? `<span class="tree-badge warn" title="Kubernetes node is cordoned">CORDONED</span>` : '';
   const k8sDrainBdg = nd.k8s_drain_status === 'drained'
-    ? `<span class="tree-badge blue">K8s Drained</span>`
+    ? `<span class="tree-badge ready" title="${escAttr(nd.k8s_drain_detail || 'Kubernetes drain complete')}">K8s Ready</span>`
     : nd.k8s_drain_status === 'blocked'
-      ? `<span class="tree-badge warn" title="${escAttr(nd.k8s_drain_detail || 'Kubernetes drain blocked')}">Drain Blocked</span>`
+      ? `<span class="tree-badge risk" title="${escAttr(nd.k8s_drain_detail || 'Kubernetes drain blocked')}">Drain Blocked</span>`
       : '';
-  const novaDisabledBdg = nd.compute_status === 'disabled' ? `<span class="tree-badge nosched">Nova Disabled</span>` : '';
+  const novaDisabledBdg = nd.compute_status === 'disabled' ? `<span class="tree-badge nosched" title="Nova compute service is disabled">Nova Disabled</span>` : '';
   const evacuatedBdg = nd.nova_evacuation_status === 'evacuated'
-    ? `<span class="tree-badge blue">Evacuated</span>`
+    ? `<span class="tree-badge ready" title="${escAttr(nd.nova_evacuation_detail || 'Hypervisor evacuated')}">Evacuated</span>`
     : nd.nova_evacuation_status === 'disabled'
       ? `<span class="tree-badge warn" title="${escAttr(nd.nova_evacuation_detail || 'Nova disabled but instances remain on host')}">Not Evacuated</span>`
     : nd.nova_evacuation_status === 'blocked'
-      ? `<span class="tree-badge warn" title="${escAttr(nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`
+      ? `<span class="tree-badge risk" title="${escAttr(nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`
       : '';
-  const readyBdg = nd.maintenance_ready ? `<span class="tree-badge edge">Ready</span>` : '';
+  const readyBdg = nd.maintenance_ready ? `<span class="tree-badge ready-strong" title="Kubernetes drain and Nova evacuation are complete">Ready for Maintenance</span>` : '';
   const noSchedBdg = noSched.length
     ? `<span class="tree-badge nosched" title="${escAttr(noSched.map(taintLabel).join(', '))}">NoSchedule</span>`
     : '';
@@ -521,7 +528,9 @@ function treeItemHtml(name, nd) {
     : '';
 
   let vmBadge = '';
-  if (nd.is_compute && nd.vm_count != null && nd.vm_count > 0) vmBadge = `<span class="tree-badge warn">${nd.vm_count} vm</span>`;
+  if (nd.is_compute && nd.vm_count != null && nd.vm_count > 0) vmBadge = `<span class="tree-badge count" title="${escAttr(`${nd.vm_count} instance(s) remain on this host`)}">${nd.vm_count} VM</span>`;
+  let amphoraBadge = '';
+  if (nd.is_compute && nd.amphora_count != null && nd.amphora_count > 0) amphoraBadge = `<span class="tree-badge amp" title="${escAttr(`${nd.amphora_count} Amphora instance(s) remain on this host`)}">${nd.amphora_count} Amph</span>`;
 
   let aggHtml = '';
   if (nd.aggregates?.length) {
@@ -531,13 +540,13 @@ function treeItemHtml(name, nd) {
     if (extra > 0) aggHtml += `<span class="tree-badge agg">+${extra}</span>`;
   }
 
-  return `<div class="tree-item${sel}${mismatch}" onclick="selectNode('${escAttr(name)}')" data-node="${escAttr(name)}">
+  return `<div class="tree-item${sel}${mismatch}${maintenanceClass}" onclick="selectNode('${escAttr(name)}')" data-node="${escAttr(name)}">
     <span class="ti-ico">${ico}</span>
     <span class="tree-dot ${dot}"></span>
     <span class="ti-name">${esc(name)}</span>
     <span class="tree-meta">
       <span class="hint">${hintTxt}</span>
-      ${etcBdg}${mariadbBdg}${agentBdg}${edgeBdg}${netBdg}${cordonedBdg}${k8sDrainBdg}${novaDisabledBdg}${evacuatedBdg}${readyBdg}${noSchedBdg}${rebootBdg}${kernelBdg}${computeMismatchBdg}${vmBadge}${aggHtml}
+      ${etcBdg}${mariadbBdg}${agentBdg}${edgeBdg}${netBdg}${readyBdg}${k8sDrainBdg}${evacuatedBdg}${cordonedBdg}${novaDisabledBdg}${noSchedBdg}${vmBadge}${amphoraBadge}${rebootBdg}${kernelBdg}${computeMismatchBdg}${aggHtml}
     </span>
   </div>`;
 }
