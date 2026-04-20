@@ -1,6 +1,17 @@
 'use strict';
 
 let projectSearchTimer = null;
+const projectCloneState = {
+  open: false,
+  source: null,
+  newName: '',
+  cloneDataVolumes: true,
+  createFloatingIp: true,
+  powerOn: true,
+  keepMetadata: true,
+  message: '',
+  tone: 'info',
+};
 
 function projectViewLabel(name = activeProjectView) {
   return ({
@@ -579,8 +590,327 @@ function renderProjectSectionToolbar(title, extra = '') {
   `;
 }
 
+function projectCloneSourceFor(instanceId) {
+  if (projectDetailState.kind === 'instances' && projectDetailState.item?.id === instanceId) {
+    return projectDetailState.data || projectDetailState.item || null;
+  }
+  const inv = projectInventoryForView('instances');
+  return (inv?.instances || []).find((item) => item.id === instanceId) || null;
+}
+
+function projectCloneVolumeRows(instance) {
+  const vols = Array.isArray(instance?.volumes) ? instance.volumes : [];
+  const rootId = String(instance?.root_volume_id || '');
+  return vols.map((vol) => {
+    const isRoot = rootId && vol.id === rootId;
+    return {
+      id: vol.id || '',
+      name: vol.name || vol.id || 'Unnamed volume',
+      size: vol.size_gb,
+      role: isRoot ? 'Root volume' : 'Data volume',
+      cloneable: isRoot ? true : !vol.multiattach,
+      reason: isRoot ? 'Boot source for the new server.' : (vol.multiattach ? 'Skip by default because the volume is multiattach.' : 'Can be cloned and attached to the new server.'),
+    };
+  });
+}
+
+function openProjectClonePlanner(instanceId) {
+  const instance = projectCloneSourceFor(instanceId);
+  if (!instance) {
+    onLog?.({ node: '-', message: `Clone source ${instanceId} is not loaded yet. Open the instance detail first and try again.`, color: 'warn' });
+    return;
+  }
+  if (isAmphoraInstance(instance)) {
+    onLog?.({ node: '-', message: `Clone is blocked for amphora instance ${instance.name || instance.id || instanceId}.`, color: 'warn' });
+    return;
+  }
+  projectCloneState.open = true;
+  projectCloneState.source = instance;
+  projectCloneState.newName = `${String(instance.name || 'instance').trim() || 'instance'}-clone`;
+  projectCloneState.cloneDataVolumes = true;
+  projectCloneState.createFloatingIp = true;
+  projectCloneState.powerOn = true;
+  projectCloneState.keepMetadata = true;
+  projectCloneState.message = '';
+  projectCloneState.tone = 'info';
+  renderProjectCloneOverlay();
+}
+
+function closeProjectClonePlanner() {
+  projectCloneState.open = false;
+  projectCloneState.source = null;
+  projectCloneState.message = '';
+  const overlay = document.getElementById('project-clone-overlay');
+  if (overlay) overlay.classList.remove('open');
+}
+
+function updateProjectCloneField(field, value) {
+  if (!(field in projectCloneState)) return;
+  projectCloneState[field] = value;
+  renderProjectCloneOverlay();
+}
+
+function captureProjectCloneFocusState(container) {
+  const active = document.activeElement;
+  if (!container || !active || !container.contains(active) || !active.matches('[data-clone-field]')) return null;
+  return {
+    selector: `[data-clone-field="${active.getAttribute('data-clone-field')}"]`,
+    start: typeof active.selectionStart === 'number' ? active.selectionStart : null,
+    end: typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
+  };
+}
+
+function restoreProjectCloneFocusState(container, state) {
+  if (!container || !state?.selector) return;
+  const input = container.querySelector(state.selector);
+  if (!input) return;
+  input.focus();
+  if (typeof state.start === 'number' && typeof state.end === 'number') {
+    try { input.setSelectionRange(state.start, state.end); } catch (_) {}
+  }
+}
+
+function submitProjectClonePlanner() {
+  const instance = projectCloneState.source;
+  if (!instance) return;
+  const ports = Array.isArray(instance.ports) ? instance.ports : [];
+  const newName = String(projectCloneState.newName || '').trim();
+  if (!newName) {
+    projectCloneState.message = 'Provide a name for the new server.';
+    projectCloneState.tone = 'error';
+    renderProjectCloneOverlay();
+    const input = document.getElementById('project-clone-name');
+    input?.focus();
+    return;
+  }
+  const dataVolumeCount = projectCloneVolumeRows(instance).filter((item) => item.role === 'Data volume' && item.cloneable).length;
+  const method = instance.is_volume_backed ? 'clone boot volume + boot new server' : 'snapshot source server + boot new server';
+  const sourceFloatingIpCount = ports
+    .flatMap((port) => port.floating_ips || [])
+    .map((ip) => (typeof ip === 'string' ? ip : (ip.address || ip.floating_ip_address || '')))
+    .filter(Boolean)
+    .length;
+  onLog?.({
+    node: '-',
+    message: `Clone plan prepared for ${instance.name || instance.id}: create ${newName} via ${method}; data volumes ${projectCloneState.cloneDataVolumes ? `enabled (${dataVolumeCount})` : 'skipped'}; floating IP ${projectCloneState.createFloatingIp ? (sourceFloatingIpCount ? 'create new external IP' : 'create new external IP if needed') : 'do not create'}; power ${projectCloneState.powerOn ? 'on' : 'off'}.`,
+    color: 'important',
+  });
+  projectCloneState.message = projectCloneState.createFloatingIp
+    ? 'Clone planner is now wired up. Backend execution is still not implemented in this build, but the action is no longer a dead click. The default plan requests a new floating IP for the clone.'
+    : 'Clone planner is now wired up. Backend execution is still not implemented in this build, but the action is no longer a dead click. No floating IP will be created automatically; reassociation stays manual.';
+  projectCloneState.tone = 'warn';
+  renderProjectCloneOverlay();
+}
+
+function renderProjectCloneOverlay() {
+  const overlay = document.getElementById('project-clone-overlay');
+  const content = document.getElementById('project-clone-overlay-content');
+  if (!overlay || !content) return;
+  if (!projectCloneState.open || !projectCloneState.source) {
+    overlay.classList.remove('open');
+    content.innerHTML = '';
+    return;
+  }
+  const instance = projectCloneState.source;
+  const ports = Array.isArray(instance.ports) ? instance.ports : [];
+  const volumeRows = projectCloneVolumeRows(instance);
+  const rootVolume = volumeRows.find((item) => item.role === 'Root volume') || null;
+  const cloneableDataVolumes = volumeRows.filter((item) => item.role === 'Data volume' && item.cloneable);
+  const skippedDataVolumes = volumeRows.filter((item) => item.role === 'Data volume' && !item.cloneable);
+  const relatedLbs = Array.isArray(instance.related_load_balancers) ? instance.related_load_balancers : [];
+  const sourceFloatingIps = ports
+    .flatMap((port) => port.floating_ips || [])
+    .map((ip) => (typeof ip === 'string' ? ip : (ip.address || ip.floating_ip_address || '')))
+    .filter(Boolean);
+  const securityGroups = [...new Set(ports.flatMap((port) => port.security_group_names || []))].filter(Boolean);
+  const securityGroupRows = securityGroups.map((name) => {
+    const attachedPorts = ports
+      .filter((port) => [...new Set(port.security_group_names || port.security_groups || [])].includes(name))
+      .map((port) => port.id || port.network_name || port.network_id || 'port')
+      .filter(Boolean);
+    const networks = ports
+      .filter((port) => [...new Set(port.security_group_names || port.security_groups || [])].includes(name))
+      .map((port) => port.network_name || port.network_id || '')
+      .filter(Boolean);
+    return {
+      name,
+      portCount: attachedPorts.length,
+      attachedPorts,
+      networks: [...new Set(networks)],
+    };
+  });
+  const flavor = instance.flavor || {};
+  const statusTone = projectCloneState.tone === 'error' ? 'err-block' : projectCloneState.tone === 'warn' ? 'note' : 'subtle';
+  const priorShell = content.querySelector('.project-clone-shell');
+  const priorScrollTop = priorShell ? priorShell.scrollTop : 0;
+  const focusState = captureProjectCloneFocusState(content);
+  content.innerHTML = `
+    <div class="project-clone-shell" role="dialog" aria-modal="true" aria-labelledby="project-clone-title">
+      <div class="session-head">
+        <div class="session-head-brand">
+          <div class="session-brand-icon">C</div>
+          <div>
+            <div class="session-brand" id="project-clone-title">Clone VM</div>
+            <div class="session-kicker">Project-scoped planner for ${esc(instance.name || instance.id || 'selected instance')}.</div>
+          </div>
+        </div>
+        <div class="session-title">Clone Planner</div>
+        <div class="session-sub">Review the source workload, pick safe defaults, and stage the clone request.</div>
+      </div>
+      <div class="session-body">
+        <div class="session-panel">
+          <div class="session-panel-head">
+            <div class="session-panel-title">Source Summary</div>
+            <div class="session-panel-sub">${esc(instance.is_volume_backed ? 'Volume-backed instance' : 'Image / ephemeral instance')}</div>
+          </div>
+          <div class="session-panel-body">
+            <div class="summary-grid">
+              <div class="card">
+                <div class="card-title">Instance</div>
+                <div class="card-body">
+                  <div class="mrow"><span class="ml">Name</span><span class="mv">${esc(instance.name || instance.id || '—')}</span></div>
+                  <div class="mrow"><span class="ml">Status</span><span class="mv">${esc(instance.status || 'UNKNOWN')}</span></div>
+                  <div class="mrow"><span class="ml">Host</span><span class="mv">${esc(instance.compute_host || '—')}</span></div>
+                  <div class="mrow"><span class="ml">Flavor</span><span class="mv">${esc(flavor.name || flavor.id || '—')}</span></div>
+                </div>
+              </div>
+              <div class="card">
+                <div class="card-title">Network</div>
+                <div class="card-body">
+                  <div class="mrow"><span class="ml">Ports</span><span class="mv">${esc(String(ports.length || 0))}</span></div>
+                  <div class="mrow"><span class="ml">Security groups</span><span class="mv">${esc(securityGroups.join(', ') || '—')}</span></div>
+                  <div class="mrow"><span class="ml">Load balancer links</span><span class="mv">${esc(String(relatedLbs.length || 0))}</span></div>
+                  <div class="mrow"><span class="ml">Boot source</span><span class="mv">${esc(rootVolume?.name || (instance.is_volume_backed ? 'Root volume present' : 'Image / ephemeral disk'))}</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="finding ${instance.is_volume_backed ? 'good' : 'warn'}" style="margin-top:4px">
+              <div class="finding-mark">${instance.is_volume_backed ? '✓' : '!'}</div>
+              <div><strong>${esc(instance.is_volume_backed ? 'Boot volume clone path available.' : 'Boot volume is not visible.' )}</strong>${esc(instance.is_volume_backed ? ' The safest default is to clone the boot volume and create fresh Neutron ports.' : ' This planner falls back to a snapshot-style path until a backend clone API exists.')}</div>
+            </div>
+            ${relatedLbs.length ? `<div class="finding warn" style="margin-top:4px"><div class="finding-mark">!</div><div><strong>Load balancer membership will not be cloned automatically.</strong>${esc(` ${relatedLbs.length} load balancer relationship(s) were detected on the source instance.`)}</div></div>` : ''}
+          </div>
+        </div>
+
+        <div class="session-panel">
+          <div class="session-panel-head">
+            <div class="session-panel-title">Network Plan</div>
+            <div class="session-panel-sub">Fresh Neutron ports and IP assignments are expected for the clone.</div>
+          </div>
+          <div class="session-panel-body">
+            <table class="data-table" style="margin-bottom:0">
+              <thead><tr><th>Port</th><th>Network</th><th>Fixed IPs</th><th>Subnet / Router</th><th>Floating IPs</th><th>Security Groups</th></tr></thead>
+              <tbody>
+                ${ports.length ? ports.map((port) => {
+                  const subnetLabels = (port.subnets || []).map((subnet) => {
+                    const router = subnet?.router?.name || subnet?.router?.id || port.gateway_target || '';
+                    return [subnet?.name || subnet?.cidr || subnet?.id || '', router ? `via ${router}` : ''].filter(Boolean).join(' ');
+                  }).filter(Boolean);
+                  const floatingIps = (port.floating_ips || []).map((ip) => (typeof ip === 'string' ? ip : (ip.address || ip.floating_ip_address || ''))).filter(Boolean);
+                  const portSecurityGroups = [...new Set(port.security_group_names || port.security_groups || [])].filter(Boolean);
+                  return `<tr>
+                    <td style="font-family:monospace;font-size:11px">${esc(port.id || '—')}</td>
+                    <td>${esc(port.network_name || port.network_id || '—')}</td>
+                    <td class="mono">${esc((port.fixed_ips || []).join(', ') || '—')}</td>
+                    <td>${esc(subnetLabels.join(', ') || port.gateway_target || '—')}</td>
+                    <td class="mono">${esc(floatingIps.join(', ') || 'None')}</td>
+                    <td>${esc(portSecurityGroups.join(', ') || '—')}</td>
+                  </tr>`;
+                }).join('') : '<tr><td colspan="6" style="color:var(--dim)">No Neutron port metadata is available for this instance.</td></tr>'}
+              </tbody>
+            </table>
+            <div class="finding good" style="margin-top:4px">
+              <div class="finding-mark">✓</div>
+              <div><strong>Clone network posture.</strong>${esc(' The new server should receive fresh ports, MAC addresses, fixed IPs, and floating IP associations should be reattached deliberately rather than copied blindly.')}</div>
+            </div>
+            <div class="finding ${projectCloneState.createFloatingIp ? 'good' : 'warn'}" style="margin-top:4px">
+              <div class="finding-mark">${projectCloneState.createFloatingIp ? '✓' : '!'}</div>
+              <div><strong>${esc(projectCloneState.createFloatingIp ? 'New floating IP will be requested.' : 'Floating IP creation is disabled.')}</strong>${esc(projectCloneState.createFloatingIp
+                ? (sourceFloatingIps.length
+                  ? ` Source instance currently exposes ${sourceFloatingIps.join(', ')}; the clone should get a fresh external address instead of reusing one.`
+                  : ' The clone will ask for a new external address if north-south access is needed.')
+                : ' The clone will come up without an external address, and operators can reassociate or allocate one later.')}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="session-panel">
+          <div class="session-panel-head">
+            <div class="session-panel-title">Security Group Plan</div>
+            <div class="session-panel-sub">Carry forward only the groups that still make sense for the cloned workload.</div>
+          </div>
+          <div class="session-panel-body">
+            <table class="data-table" style="margin-bottom:0">
+              <thead><tr><th>Security Group</th><th>Networks</th><th>Attached Ports</th><th>Clone Guidance</th></tr></thead>
+              <tbody>
+                ${securityGroupRows.length ? securityGroupRows.map((group) => `<tr>
+                  <td>${esc(group.name)}</td>
+                  <td>${esc(group.networks.join(', ') || '—')}</td>
+                  <td class="mono">${esc(group.attachedPorts.join(', ') || '—')}</td>
+                  <td>${esc(group.portCount > 1 ? 'Shared across multiple source ports; confirm the clone still needs the same east-west reachability.' : 'Present on a single source port; safe default is to preserve until application cutover is reviewed.')}</td>
+                </tr>`).join('') : '<tr><td colspan="4" style="color:var(--dim)">No security groups are attached to the source instance ports.</td></tr>'}
+              </tbody>
+            </table>
+            <div class="finding warn" style="margin-top:4px">
+              <div class="finding-mark">!</div>
+              <div><strong>Security review still matters.</strong>${esc(' Reusing the same security groups is a reasonable default, but ingress rules, floating IP exposure, and load balancer membership should be validated before the clone is put into service.')}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="session-panel">
+          <div class="session-panel-head">
+            <div class="session-panel-title">Clone Settings</div>
+          </div>
+          <div class="session-panel-body">
+            <label class="project-clone-field">
+              <span>New server name</span>
+              <input id="project-clone-name" data-clone-field="newName" class="dv-filter" type="text" value="${escAttr(projectCloneState.newName)}" oninput="updateProjectCloneField('newName', this.value)">
+            </label>
+            <label class="project-clone-check"><input data-clone-field="cloneDataVolumes" type="checkbox" ${projectCloneState.cloneDataVolumes ? 'checked' : ''} onchange="updateProjectCloneField('cloneDataVolumes', this.checked)"> Clone attached data volumes when safe</label>
+            <label class="project-clone-check"><input data-clone-field="createFloatingIp" type="checkbox" ${projectCloneState.createFloatingIp ? 'checked' : ''} onchange="updateProjectCloneField('createFloatingIp', this.checked)"> Create a new floating IP for the clone by default</label>
+            <label class="project-clone-check"><input data-clone-field="powerOn" type="checkbox" ${projectCloneState.powerOn ? 'checked' : ''} onchange="updateProjectCloneField('powerOn', this.checked)"> Boot the new server after create</label>
+            <label class="project-clone-check"><input data-clone-field="keepMetadata" type="checkbox" ${projectCloneState.keepMetadata ? 'checked' : ''} onchange="updateProjectCloneField('keepMetadata', this.checked)"> Preserve instance metadata where possible</label>
+          </div>
+        </div>
+
+        <div class="session-panel">
+          <div class="session-panel-head">
+            <div class="session-panel-title">Volume Plan</div>
+            <div class="session-panel-sub">${esc(`${cloneableDataVolumes.length} cloneable data volume(s), ${skippedDataVolumes.length} skipped`)}</div>
+          </div>
+          <div class="session-panel-body">
+            <table class="data-table" style="margin-bottom:0">
+              <thead><tr><th>Volume</th><th>Role</th><th>Action</th><th>Note</th></tr></thead>
+              <tbody>
+                ${volumeRows.length ? volumeRows.map((item) => `<tr>
+                  <td>${esc(item.name)}</td>
+                  <td>${esc(item.role)}</td>
+                  <td>${esc(item.role === 'Root volume' ? 'Clone' : (projectCloneState.cloneDataVolumes && item.cloneable ? 'Clone' : 'Skip'))}</td>
+                  <td>${esc(item.reason)}</td>
+                </tr>`).join('') : '<tr><td colspan="4" style="color:var(--dim)">No attached volume metadata is available for this instance.</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        ${projectCloneState.message ? `<div class="${statusTone}" style="padding:10px 12px">${esc(projectCloneState.message)}</div>` : ''}
+
+        <div class="session-actions" style="justify-content:flex-end">
+          <button class="btn" onclick="closeProjectClonePlanner()">Close</button>
+          <button class="btn primary" onclick="submitProjectClonePlanner()">Review Clone Plan</button>
+        </div>
+      </div>
+    </div>
+  `;
+  overlay.classList.add('open');
+  const nextShell = content.querySelector('.project-clone-shell');
+  if (nextShell) nextShell.scrollTop = priorScrollTop;
+  restoreProjectCloneFocusState(content, focusState);
+}
+
 function cloneProjectInstance(instanceId) {
-  onLog?.({ node: '-', message: `Clone workflow is not implemented yet for instance ${instanceId}.`, color: 'warn' });
+  openProjectClonePlanner(instanceId);
 }
 
 function findProjectItem(kind, id) {
@@ -743,11 +1073,8 @@ function renderProjectInstances(inv) {
   const items = projectFilterRows(inv.instances || [], ['name', 'status', 'compute_host', 'project_name'], projectInventoryState.filter);
   const projectInstances = items.filter((item) => !isAmphoraInstance(item));
   const amphoraInstances = items.filter((item) => isAmphoraInstance(item));
-  const cloneButton = projectDetailState.kind === 'instances' && projectDetailState.item?.id && !isAmphoraInstance(projectDetailState.item)
-    ? `<button class="btn primary" onclick="cloneProjectInstance('${escAttr(projectDetailState.item.id)}')">Clone VM</button>`
-    : `<button class="btn primary" onclick="onLog?.({ node: '-', message: 'Select a non-amphora instance first to start clone.', color: 'warn' })">Clone VM</button>`;
   return `
-    ${renderProjectToolbar('Instances', items.length, 'Filter instances…', cloneButton)}
+    ${renderProjectToolbar('Instances', items.length, 'Filter instances…')}
     <div class="card" style="margin-bottom:10px">
       <div class="card-title">Project Instances</div>
       <div class="card-body" style="padding:0">

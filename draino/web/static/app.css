@@ -2098,6 +2098,32 @@ body.no-hints .vmware-ref-card { display: none !important; }
   box-shadow: 0 18px 50px rgba(15, 23, 42, 0.28);
   overflow: auto;
 }
+.project-clone-shell {
+  width: min(70vw, 1040px);
+  max-width: 100%;
+  max-height: calc(100vh - 64px);
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.28);
+  overflow: auto;
+}
+.project-clone-field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+}
+.project-clone-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+.project-clone-check input {
+  margin: 0;
+}
 .api-issues-head {
   padding: 18px 22px 14px;
   background: linear-gradient(180deg, #fff9f9 0%, #fff2f2 100%);
