@@ -46,6 +46,8 @@ def test_build_maintenance_readiness_report_aggregates_live_node_state(monkeypat
             hosts_mariadb=True,
         ),
     }
+    server.node_states["cmp-a02"].k8s_drain_status = "drained"
+    server.node_states["cmp-a02"].nova_evacuation_status = "evacuated"
 
     monkeypatch.setattr(
         web_server.k8s_ops,
@@ -165,6 +167,8 @@ def test_build_capacity_headroom_report_aggregates_live_compute_state(monkeypatc
             node_agent_ready=True,
         ),
     }
+    server.node_states["cmp-a01"].k8s_drain_status = "drained"
+    server.node_states["cmp-a01"].nova_evacuation_status = "evacuated"
 
     monkeypatch.setattr(
         web_server.openstack_ops,
@@ -196,10 +200,10 @@ def test_build_capacity_headroom_report_aggregates_live_compute_state(monkeypatc
     assert payload["error"] is None
     assert payload["report"]["scope"]["computes"] == 2
     assert payload["report"]["scope"]["instances"] == 36
-    assert payload["report"]["summary"]["drain_safe_hosts"] == 1
+    assert payload["report"]["summary"]["drain_safe_hosts"] == 0
     assert payload["report"]["items"][0]["host"] == "cmp-a01"
     assert payload["report"]["items"][0]["availability_zone"] == "az-a"
-    assert payload["report"]["items"][0]["maintenance_status"] == "drain-safe"
+    assert payload["report"]["items"][0]["maintenance_status"] == "review"
     assert payload["report"]["items"][1]["maintenance_status"] == "blocked"
     assert payload["report"]["az_headroom"][1]["availability_zone"] == "az-c"
     assert payload["report"]["az_headroom"][1]["severity"] == "high"

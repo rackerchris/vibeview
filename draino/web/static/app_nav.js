@@ -453,6 +453,8 @@ function phaseColor(nd) {
   if (nd.phase === 'running') return 'yellow';
   if (nd.phase === 'complete') return 'green';
   if (!nd.k8s_ready) return 'red';
+  if (nd.maintenance_ready) return 'green';
+  if (nd.k8s_drain_status === 'blocked' || nd.nova_evacuation_status === 'blocked') return 'yellow';
   if (nd.k8s_cordoned) return 'gray';
   if (nd.compute_status === 'down') return 'red';
   if (nd.compute_status === 'disabled') return 'yellow';
@@ -492,6 +494,19 @@ function treeItemHtml(name, nd) {
   const edgeBdg = nd.is_edge ? `<span class="tree-badge edge">edge</span>` : '';
   const netBdg = nd.is_network ? `<span class="tree-badge blue">network</span>` : '';
   const noSched = noScheduleTaints(nd);
+  const cordonedBdg = nd.k8s_cordoned ? `<span class="tree-badge warn">CORDONED</span>` : '';
+  const k8sDrainBdg = nd.k8s_drain_status === 'drained'
+    ? `<span class="tree-badge blue">K8s Drained</span>`
+    : nd.k8s_drain_status === 'blocked'
+      ? `<span class="tree-badge warn" title="${escAttr(nd.k8s_drain_detail || 'Kubernetes drain blocked')}">Drain Blocked</span>`
+      : '';
+  const novaDisabledBdg = nd.compute_status === 'disabled' ? `<span class="tree-badge nosched">Nova Disabled</span>` : '';
+  const evacuatedBdg = nd.nova_evacuation_status === 'evacuated'
+    ? `<span class="tree-badge blue">Evacuated</span>`
+    : nd.nova_evacuation_status === 'blocked'
+      ? `<span class="tree-badge warn" title="${escAttr(nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`
+      : '';
+  const readyBdg = nd.maintenance_ready ? `<span class="tree-badge edge">Ready</span>` : '';
   const noSchedBdg = noSched.length
     ? `<span class="tree-badge nosched" title="${escAttr(noSched.map(taintLabel).join(', '))}">NoSchedule</span>`
     : '';
@@ -520,7 +535,7 @@ function treeItemHtml(name, nd) {
     <span class="ti-name">${esc(name)}</span>
     <span class="tree-meta">
       <span class="hint">${hintTxt}</span>
-      ${etcBdg}${mariadbBdg}${agentBdg}${edgeBdg}${netBdg}${noSchedBdg}${rebootBdg}${kernelBdg}${computeMismatchBdg}${vmBadge}${aggHtml}
+      ${etcBdg}${mariadbBdg}${agentBdg}${edgeBdg}${netBdg}${cordonedBdg}${k8sDrainBdg}${novaDisabledBdg}${evacuatedBdg}${readyBdg}${noSchedBdg}${rebootBdg}${kernelBdg}${computeMismatchBdg}${vmBadge}${aggHtml}
     </span>
   </div>`;
 }

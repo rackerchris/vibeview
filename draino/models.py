@@ -94,6 +94,10 @@ class NodeState:
     steps: list[WorkflowStep] = field(default_factory=list)
     instances: list[InstanceInfo] = field(default_factory=list)
     log_buffer: list[str] = field(default_factory=list)
+    k8s_drain_status: str = "clear"
+    k8s_drain_detail: str = ""
+    nova_evacuation_status: str = "clear"
+    nova_evacuation_detail: str = ""
 
     def add_log(self, msg: str) -> None:
         ts = time.strftime("%H:%M:%S")
@@ -104,28 +108,23 @@ class NodeState:
 
     def init_steps(self) -> None:
         self.steps = [
-            WorkflowStep("cordon",         "Cordon K8s node"),
             WorkflowStep("disable_nova",   "Disable Nova compute service"),
             WorkflowStep("list_instances", "Enumerate instances on hypervisor"),
             WorkflowStep("migrate_vms",    "Live-migrate non-Amphora instances"),
             WorkflowStep("failover_lbs",   "Failover Amphora load balancers"),
             WorkflowStep("await_empty",    "Wait for hypervisor to empty"),
-            WorkflowStep("drain_k8s",      "Drain K8s node (evict pods)"),
         ]
 
     def init_quick_drain_steps(self, is_compute: bool) -> None:
-        steps = [WorkflowStep("cordon", "Cordon K8s node")]
-        if is_compute:
-            steps.append(WorkflowStep("disable_nova", "Disable Nova compute service"))
-        steps.append(WorkflowStep("drain_k8s", "Drain K8s node (evict pods)"))
-        self.steps = steps
+        del is_compute
+        self.steps = [
+            WorkflowStep("cordon", "Cordon K8s node"),
+            WorkflowStep("drain_k8s", "Drain K8s node (evict drain-safe pods)"),
+        ]
 
     def init_undrain_steps(self, is_compute: bool) -> None:
-        steps = []
-        if is_compute:
-            steps.append(WorkflowStep("enable_nova", "Enable Nova compute service"))
-        steps.append(WorkflowStep("uncordon", "Uncordon K8s node"))
-        self.steps = steps
+        del is_compute
+        self.steps = [WorkflowStep("uncordon", "Uncordon K8s node")]
 
     def init_reboot_steps(self) -> None:
         self.steps = [
@@ -134,3 +133,34 @@ class NodeState:
             WorkflowStep("await_online",  "Wait for node to come back online"),
             WorkflowStep("uncordon",      "Uncordon K8s node"),
         ]
+
+    def effective_k8s_drain_status(self) -> str:
+        if not self.k8s_cordoned:
+            return "clear"
+        if self.phase == NodePhase.RUNNING and self.get_step("drain_k8s"):
+            return "in_progress"
+        if self.k8s_drain_status in {"drained", "blocked", "error"}:
+            return self.k8s_drain_status
+        return "clear"
+
+    def effective_nova_evacuation_status(self) -> str:
+        if not self.is_compute:
+            return "clear"
+        if self.phase == NodePhase.RUNNING and self.get_step("disable_nova"):
+            return "in_progress"
+        if self.nova_evacuation_status in {"blocked", "error"}:
+            return self.nova_evacuation_status
+        if self.compute_status != "disabled":
+            return "clear"
+        if (self.vm_count or 0) > 0 or (self.amphora_count or 0) > 0:
+            return "clear"
+        if self.nova_evacuation_status == "evacuated":
+            return "evacuated"
+        return "clear"
+
+    def maintenance_ready(self) -> bool:
+        k8s_ready = self.effective_k8s_drain_status() == "drained"
+        nova_ready = self.effective_nova_evacuation_status() == "evacuated"
+        if self.is_compute:
+            return k8s_ready and nova_ready
+        return k8s_ready

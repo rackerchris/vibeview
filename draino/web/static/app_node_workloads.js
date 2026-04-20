@@ -133,7 +133,7 @@ function renderObjectLink(label, onclickJs) {
 }
 
 function renderPodsTab(nd) {
-  const drained = nd.k8s_cordoned || nd.compute_status === 'disabled';
+  const drained = nd.k8s_drain_status !== 'clear' || nd.k8s_cordoned;
   let h = `<div class="inst-toolbar">
     <button class="btn ${drained ? 'warning' : ''}" onclick="actionDrainOrUndrain()">${drained ? '↺ Undrain' : '▽ Drain'}</button>
     <span style="flex:1"></span>

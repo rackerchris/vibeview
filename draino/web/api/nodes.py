@@ -151,6 +151,104 @@ async def api_node_metrics(node_name: str, request: Request):
         return payload
 
 
+@router.get("/api/nodes/{node_name}/drain-preflight")
+async def api_node_drain_preflight(node_name: str, request: Request):
+    session = _require_session_record()(request)
+    try:
+        payload = await _run_with_timeout(k8s_ops.get_drain_preflight, node_name, session.server.k8s_auth)
+        return payload
+    except TimeoutError:
+        return {
+            "node": node_name,
+            "evictable": [],
+            "skipped": [],
+            "blockers": [],
+            "summary": {"evictable": 0, "skipped": 0, "blocking": 0, "state": "error"},
+            "warning": None,
+            "error": f"Timed out after {_RESOURCE_DETAIL_TIMEOUT_SECONDS:.0f}s while loading drain preflight",
+        }
+    except Exception as exc:
+        return {
+            "node": node_name,
+            "evictable": [],
+            "skipped": [],
+            "blockers": [],
+            "summary": {"evictable": 0, "skipped": 0, "blocking": 0, "state": "error"},
+            "warning": None,
+            "error": str(exc),
+        }
+
+
+@router.get("/api/nodes/{node_name}/evacuate-preflight")
+async def api_node_evacuate_preflight(node_name: str, request: Request):
+    session = _require_session_record()(request)
+    state = session.server.node_states.get(node_name)
+    if state is None:
+        return {"node": node_name, "items": [], "summary": {}, "warning": None, "error": f"Unknown node '{node_name}'"}
+    if not state.is_compute:
+        return {
+            "node": node_name,
+            "items": [],
+            "summary": {"instances": 0, "regular_vms": 0, "amphora": 0, "volume_backed": 0, "ephemeral": 0},
+            "warning": "Node is not a compute host; Nova evacuation is not required.",
+            "error": None,
+        }
+    if session.server.openstack_auth is None:
+        return {
+            "node": node_name,
+            "items": [],
+            "summary": {"instances": 0, "regular_vms": 0, "amphora": 0, "volume_backed": 0, "ephemeral": 0},
+            "warning": None,
+            "error": "OpenStack credentials are required for evacuation preflight.",
+        }
+    try:
+        items = await _run_with_timeout(openstack_ops.get_instances_preflight, state.hypervisor, session.server.openstack_auth)
+    except TimeoutError:
+        return {
+            "node": node_name,
+            "items": [],
+            "summary": {"instances": 0, "regular_vms": 0, "amphora": 0, "volume_backed": 0, "ephemeral": 0},
+            "warning": None,
+            "error": f"Timed out after {_RESOURCE_DETAIL_TIMEOUT_SECONDS:.0f}s while loading evacuation preflight",
+        }
+    except Exception as exc:
+        return {
+            "node": node_name,
+            "items": [],
+            "summary": {"instances": 0, "regular_vms": 0, "amphora": 0, "volume_backed": 0, "ephemeral": 0},
+            "warning": None,
+            "error": str(exc),
+        }
+
+    regular_vms = [item for item in items if not item.get("is_amphora")]
+    amphora = [item for item in items if item.get("is_amphora")]
+    volume_backed = [item for item in regular_vms if item.get("is_volume_backed")]
+    ephemeral = [item for item in regular_vms if not item.get("is_volume_backed")]
+    active = [item for item in regular_vms if str(item.get("status") or "").upper() == "ACTIVE"]
+    warning: str | None = None
+    if amphora:
+        warning = f"{len(amphora)} Amphora instance(s) will require load-balancer failover handling."
+    elif ephemeral:
+        warning = f"{len(ephemeral)} ephemeral VM(s) may require migration fallback depending on hypervisor policy."
+    elif regular_vms:
+        warning = f"{len(active)} active VM(s) look like live-migration candidates."
+
+    return {
+        "node": node_name,
+        "items": items,
+        "summary": {
+            "instances": len(items),
+            "regular_vms": len(regular_vms),
+            "amphora": len(amphora),
+            "volume_backed": len(volume_backed),
+            "ephemeral": len(ephemeral),
+            "active": len(active),
+        },
+        "warning": warning,
+        "error": None,
+    }
+
+
 @router.get("/api/nodes/{node_name}/network-stats")
 async def api_node_network_stats(node_name: str, request: Request):
     with measure_latency("node_network_stats"):

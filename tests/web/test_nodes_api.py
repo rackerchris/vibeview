@@ -188,6 +188,107 @@ def test_node_metrics_endpoint_caches_and_refreshes(monkeypatch):
     assert captured == {"metrics": 2}
 
 
+def test_node_drain_preflight_endpoint_returns_classification(monkeypatch):
+    monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
+    monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
+
+    class FakeConn:
+        def authorize(self):
+            return None
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
+    monkeypatch.setattr(
+        web_server.k8s_ops,
+        "get_drain_preflight",
+        lambda node_name, auth=None: {
+            "node": node_name,
+            "evictable": [{"ref": "default/web-abc", "owner": "Deployment/web", "namespace": "default", "name": "web-abc", "phase": "Running"}],
+            "skipped": [{"ref": "kube-system/node-exporter", "owner": "DaemonSet/node-exporter", "namespace": "kube-system", "name": "node-exporter", "phase": "Running"}],
+            "blockers": [{"ref": "db/mariadb-0", "owner": "StatefulSet/mariadb", "namespace": "db", "name": "mariadb-0", "phase": "Running"}],
+            "summary": {"evictable": 1, "skipped": 1, "blocking": 1, "state": "blocked"},
+            "warning": "1 blocking pod(s) require operator action before drain.",
+            "error": None,
+        },
+    )
+
+    payload = {
+        "kubernetes": {"server": "https://cluster.example:6443", "token": "token-1", "skip_tls_verify": False},
+        "openstack": {
+            "auth_url": "https://keystone.example/v3",
+            "username": "ops-user",
+            "password": "secret",
+            "project_name": "admin",
+            "user_domain_name": "Default",
+            "project_domain_name": "Default",
+        },
+    }
+
+    with TestClient(web_server.fastapi_app) as client:
+        login = client.post("/api/session", json=payload)
+        assert login.status_code == 200
+        record = next(iter(web_server._sessions._sessions.values()))
+        record.server.node_states["node-a"] = NodeState(k8s_name="node-a", hypervisor="hv-a", is_compute=True)
+        resp = client.get("/api/nodes/node-a/drain-preflight")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"]["blocking"] == 1
+    assert body["blockers"][0]["ref"] == "db/mariadb-0"
+
+
+def test_node_evacuate_preflight_endpoint_summarises_instances(monkeypatch):
+    monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
+    monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
+
+    class FakeConn:
+        def authorize(self):
+            return None
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
+    monkeypatch.setattr(
+        web_server.openstack_ops,
+        "get_instances_preflight",
+        lambda hypervisor, auth=None: [
+            {"id": "vm-1", "name": "web-1", "status": "ACTIVE", "is_amphora": False, "is_volume_backed": True, "vcpus": 2, "ram_mb": 4096},
+            {"id": "vm-2", "name": "build-1", "status": "SHUTOFF", "is_amphora": False, "is_volume_backed": False, "vcpus": 4, "ram_mb": 8192},
+            {"id": "amp-1", "name": "amphora-1", "status": "ACTIVE", "is_amphora": True, "is_volume_backed": True, "vcpus": 1, "ram_mb": 1024},
+        ],
+    )
+
+    payload = {
+        "kubernetes": {"server": "https://cluster.example:6443", "token": "token-1", "skip_tls_verify": False},
+        "openstack": {
+            "auth_url": "https://keystone.example/v3",
+            "username": "ops-user",
+            "password": "secret",
+            "project_name": "admin",
+            "user_domain_name": "Default",
+            "project_domain_name": "Default",
+        },
+    }
+
+    with TestClient(web_server.fastapi_app) as client:
+        login = client.post("/api/session", json=payload)
+        assert login.status_code == 200
+        record = next(iter(web_server._sessions._sessions.values()))
+        record.server.node_states["node-a"] = NodeState(k8s_name="node-a", hypervisor="hv-a", is_compute=True)
+        resp = client.get("/api/nodes/node-a/evacuate-preflight")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"] == {
+        "instances": 3,
+        "regular_vms": 2,
+        "amphora": 1,
+        "volume_backed": 1,
+        "ephemeral": 1,
+        "active": 1,
+    }
+    assert "Amphora" in body["warning"]
+
+
 def test_node_network_stats_endpoint_returns_agent_data(monkeypatch):
     monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
     monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])

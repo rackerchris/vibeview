@@ -37,16 +37,10 @@ def run_workflow(
 
     state.phase = NodePhase.RUNNING
     state.instances = []
+    state.nova_evacuation_status = "in_progress"
+    state.nova_evacuation_detail = "disabling nova and evacuating instances"
     state.init_steps()
     update_cb()
-
-    ctx.step_set("cordon", StepStatus.RUNNING)
-    try:
-        k8s_ops.cordon_node(state.k8s_name, ctx.log, auth=k8s_auth)
-        ctx.step_set("cordon", StepStatus.SUCCESS)
-    except Exception as exc:
-        ctx.abort("cordon", str(exc))
-        return
 
     ctx.step_set("disable_nova", StepStatus.RUNNING)
     try:
@@ -54,6 +48,8 @@ def run_workflow(
         state.compute_status = "disabled"
         ctx.step_set("disable_nova", StepStatus.SUCCESS)
     except Exception as exc:
+        state.nova_evacuation_status = "error"
+        state.nova_evacuation_detail = str(exc)
         ctx.abort("disable_nova", str(exc))
         return
 
@@ -79,6 +75,8 @@ def run_workflow(
         state.amphora_count = n_amp
         ctx.step_set("list_instances", StepStatus.SUCCESS, f"{n_vm} VM(s), {n_amp} Amphora")
     except Exception as exc:
+        state.nova_evacuation_status = "error"
+        state.nova_evacuation_detail = str(exc)
         ctx.abort("list_instances", str(exc))
         return
 
@@ -155,6 +153,8 @@ def run_workflow(
         failed_n = sum(1 for i in vms if i.migration_status == "failed")
         done_n = sum(1 for i in vms if i.migration_status == "complete")
         if failed_n:
+            state.nova_evacuation_status = "blocked"
+            state.nova_evacuation_detail = f"{done_n}/{len(vms)} migrated — {failed_n} failed"
             ctx.abort("migrate_vms", f"{done_n}/{len(vms)} migrated — {failed_n} failed")
             return
         ctx.step_set("migrate_vms", StepStatus.SUCCESS, f"{done_n}/{len(vms)} migrated")
@@ -192,6 +192,8 @@ def run_workflow(
             update_cb()
 
         if any_failed:
+            state.nova_evacuation_status = "blocked"
+            state.nova_evacuation_detail = "one or more load balancer failovers failed"
             ctx.abort("failover_lbs", "One or more LB failovers failed")
             return
         ctx.step_set("failover_lbs", StepStatus.SUCCESS, f"{len(lb_ids)} LB(s) failed over")
@@ -217,21 +219,17 @@ def run_workflow(
             break
         time_module.sleep(POLL_INTERVAL)
     else:
+        state.nova_evacuation_status = "blocked"
+        state.nova_evacuation_detail = f"timeout with {count} instance(s) still present"
         ctx.abort("await_empty", f"Timeout — {count} instance(s) still present")
         return
 
     ctx.step_set("await_empty", StepStatus.SUCCESS, "Hypervisor empty")
-
-    ctx.step_set("drain_k8s", StepStatus.RUNNING)
-    try:
-        k8s_ops.drain_node(state.k8s_name, ctx.log, auth=k8s_auth)
-        ctx.step_set("drain_k8s", StepStatus.SUCCESS)
-    except Exception as exc:
-        ctx.abort("drain_k8s", str(exc))
-        return
+    state.nova_evacuation_status = "evacuated"
+    state.nova_evacuation_detail = "compute service disabled and hypervisor empty"
 
     state.phase = NodePhase.COMPLETE
-    ctx.log(f"✓ '{state.k8s_name}' fully evacuated — ready for reboot!")
+    ctx.log(f"✓ '{state.k8s_name}' evacuated — nova disabled, hypervisor empty")
     if audit_cb:
-        audit_cb("completed", "hypervisor empty, K8s node drained")
+        audit_cb("completed", "nova disabled, hypervisor empty")
     update_cb()

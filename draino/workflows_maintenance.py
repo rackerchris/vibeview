@@ -177,6 +177,7 @@ def run_drain_quick(
     k8s_auth=None,
     openstack_auth=None,
 ) -> None:
+    del openstack_ops, openstack_auth
     ctx = WorkflowContext(
         state=state,
         update_cb=update_cb,
@@ -189,33 +190,31 @@ def run_drain_quick(
     try:
         k8s_ops.cordon_node(state.k8s_name, ctx.log, auth=k8s_auth)
         state.k8s_cordoned = True
+        state.k8s_drain_status = "in_progress"
+        state.k8s_drain_detail = "cordoned"
         ctx.step_set("cordon", StepStatus.SUCCESS)
     except Exception as exc:
+        state.k8s_drain_status = "error"
+        state.k8s_drain_detail = str(exc)
         ctx.abort("cordon", str(exc))
         return
-
-    if state.is_compute:
-        ctx.step_set("disable_nova", StepStatus.RUNNING)
-        try:
-            openstack_ops.disable_compute_service(state.hypervisor, ctx.log, auth=openstack_auth)
-            state.compute_status = "disabled"
-            ctx.step_set("disable_nova", StepStatus.SUCCESS)
-        except Exception as exc:
-            ctx.abort("disable_nova", str(exc))
-            return
 
     ctx.step_set("drain_k8s", StepStatus.RUNNING)
     try:
         k8s_ops.drain_node(state.k8s_name, ctx.log, auth=k8s_auth)
+        state.k8s_drain_status = "drained"
+        state.k8s_drain_detail = "node cordoned and drain-safe pods evicted"
         ctx.step_set("drain_k8s", StepStatus.SUCCESS)
     except Exception as exc:
+        state.k8s_drain_status = "blocked"
+        state.k8s_drain_detail = str(exc)
         ctx.abort("drain_k8s", str(exc))
         return
 
     state.phase = NodePhase.IDLE
-    ctx.log(f"✓ '{state.k8s_name}' drained — cordoned, nova disabled, pods evicted")
+    ctx.log(f"✓ '{state.k8s_name}' drained — cordoned, drain-safe pods evicted")
     if audit_cb:
-        audit_cb("completed", "cordoned, nova disabled, pods evicted")
+        audit_cb("completed", "cordoned, drain-safe pods evicted")
     update_cb()
 
 
@@ -230,6 +229,7 @@ def run_undrain(
     k8s_auth=None,
     openstack_auth=None,
 ) -> None:
+    del openstack_ops, openstack_auth
     ctx = WorkflowContext(
         state=state,
         update_cb=update_cb,
@@ -238,27 +238,21 @@ def run_undrain(
         abort_prefix="Undrain aborted",
     )
 
-    if state.is_compute:
-        ctx.step_set("enable_nova", StepStatus.RUNNING)
-        try:
-            openstack_ops.enable_compute_service(state.hypervisor, ctx.log, auth=openstack_auth)
-            state.compute_status = "up"
-            ctx.step_set("enable_nova", StepStatus.SUCCESS)
-        except Exception as exc:
-            ctx.abort("enable_nova", str(exc))
-            return
-
     ctx.step_set("uncordon", StepStatus.RUNNING)
     try:
         k8s_ops.uncordon_node(state.k8s_name, ctx.log, auth=k8s_auth)
         state.k8s_cordoned = False
+        state.k8s_drain_status = "clear"
+        state.k8s_drain_detail = ""
         ctx.step_set("uncordon", StepStatus.SUCCESS)
     except Exception as exc:
+        state.k8s_drain_status = "error"
+        state.k8s_drain_detail = str(exc)
         ctx.abort("uncordon", str(exc))
         return
 
     state.phase = NodePhase.IDLE
-    ctx.log(f"✓ '{state.k8s_name}' undrained — nova enabled, node uncordoned")
+    ctx.log(f"✓ '{state.k8s_name}' undrained — node uncordoned")
     if audit_cb:
-        audit_cb("completed", "nova enabled, node uncordoned")
+        audit_cb("completed", "node uncordoned")
     update_cb()

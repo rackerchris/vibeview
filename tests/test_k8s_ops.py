@@ -93,6 +93,43 @@ def test_drain_node_fails_on_eviction_error(monkeypatch):
         k8s_ops.drain_node("node-1", lambda msg: None)
 
 
+def test_drain_node_fails_on_statefulset_pods(monkeypatch):
+    pods = [_pod("db", "mariadb-0", owners=["StatefulSet"])]
+
+    class FakeCore:
+        def list_pod_for_all_namespaces(self, field_selector=None):
+            return SimpleNamespace(items=pods)
+
+    monkeypatch.setattr(k8s_ops, "_api_client", lambda auth=None: object())
+    monkeypatch.setattr(k8s_ops.client, "CoreV1Api", lambda api_client: FakeCore())
+
+    with pytest.raises(RuntimeError, match="StatefulSet pod\\(s\\) block drain"):
+        k8s_ops.drain_node("node-1", lambda msg: None)
+
+
+def test_get_drain_preflight_classifies_pods(monkeypatch):
+    pods = [
+        _pod("default", "web-abc", owners=["ReplicaSet"]),
+        _pod("kube-system", "node-exporter", owners=["DaemonSet"]),
+        _pod("db", "mariadb-0", owners=["StatefulSet"]),
+        _pod("kube-system", "static-etcd", annotations={"kubernetes.io/config.mirror": "abc"}),
+    ]
+
+    class FakeCore:
+        def list_pod_for_all_namespaces(self, field_selector=None):
+            return SimpleNamespace(items=pods)
+
+    monkeypatch.setattr(k8s_ops, "_api_client", lambda auth=None: object())
+    monkeypatch.setattr(k8s_ops.client, "CoreV1Api", lambda api_client: FakeCore())
+
+    result = k8s_ops.get_drain_preflight("node-1")
+
+    assert result["summary"] == {"evictable": 1, "skipped": 1, "blocking": 2, "state": "blocked"}
+    assert result["evictable"][0]["ref"] == "default/web-abc"
+    assert result["skipped"][0]["reason"] == "DaemonSet pods are skipped during drain"
+    assert {item["ref"] for item in result["blockers"]} == {"db/mariadb-0", "kube-system/static-etcd"}
+
+
 def test_drain_node_fails_on_timeout_with_stuck_terminating_pods(monkeypatch):
     logs: list[str] = []
     initial = [_pod("default", "app-1")]

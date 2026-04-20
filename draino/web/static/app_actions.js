@@ -14,31 +14,31 @@ function updateActionButtons(nd) {
   nodeActions.style.display = 'flex';
 
   const phase   = nd.phase;
-  const drained = nd.k8s_cordoned || nd.compute_status === 'disabled';
-  const rebootReady = nd.is_compute
-    ? drained && nd.compute_status === 'disabled' && nd.vm_count === 0 && nd.amphora_count === 0
-    : nd.k8s_cordoned;
+  const k8sMaintenanceActive = nd.k8s_drain_status !== 'clear' || nd.k8s_cordoned;
+  const k8sDrained = nd.k8s_drain_status === 'drained';
+  const evacuated = nd.nova_evacuation_status === 'evacuated';
+  const rebootReady = !!nd.maintenance_ready;
   const busy    = ['running','rebooting','undraining'].includes(phase);
 
   const evBtn = document.getElementById('bc-evacuate');
   const drBtn = document.getElementById('bc-drain');
   const rbBtn = document.getElementById('bc-reboot');
 
-  evBtn.textContent = phase === 'running'    ? '▶ Evacuating…' : '▶ Evacuate';
+  evBtn.textContent = phase === 'running' && nd.is_compute ? '▶ Evacuating…' : evacuated ? '▶ Evacuated' : '▶ Evacuate';
   evBtn.disabled    = busy || !nd.is_compute;
-  evBtn.className   = 'btn primary';
+  evBtn.className   = `btn ${evacuated && !busy ? 'warning' : 'primary'}`;
   evBtn.style.display = hasOpenStackAuth() ? '' : 'none';
 
-  drBtn.textContent = phase === 'undraining' ? '↺ Undraining…' : drained ? '↺ Undrain' : '▽ Drain';
+  drBtn.textContent = phase === 'undraining' ? '↺ Undraining…' : k8sMaintenanceActive ? '↺ Undrain' : '▽ Drain';
   drBtn.disabled    = busy;
-  drBtn.className   = `btn ${drained && !busy ? 'warning' : ''}`;
+  drBtn.className   = `btn ${k8sMaintenanceActive && !busy ? 'warning' : ''}`;
 
   rbBtn.textContent = phase === 'rebooting'  ? '⏻ Rebooting…'  : '⏻ Reboot';
   rbBtn.disabled    = busy || !authInfo?.is_admin || !rebootReady;
   rbBtn.title       = !authInfo?.is_admin
     ? "Requires OpenStack admin role"
     : !rebootReady
-      ? "Reboot is available only after the node has been cordoned and fully drained"
+      ? "Reboot is available only after Kubernetes drain and Nova evacuation are both complete"
       : '';
 }
 
@@ -50,14 +50,22 @@ function actionRefreshNode() {
   if (!selectedNode) return;
   delete nodeDetailCache[selectedNode];
   delete nodeMetricsCache[selectedNode];
+  delete nodeDrainPreflightCache[selectedNode];
+  delete nodeEvacuatePreflightCache[selectedNode];
   loadNodeDetail(selectedNode, true);
+  loadNodeDrainPreflight(selectedNode, true);
+  if (nodes[selectedNode]?.is_compute) loadNodeEvacuatePreflight(selectedNode, true);
   if (activeTab === 'monitor') loadNodeMetrics(selectedNode, true);
 }
 
 function actionRefreshAll()  {
   Object.keys(nodeDetailCache).forEach((name) => delete nodeDetailCache[name]);
   Object.keys(nodeMetricsCache).forEach((name) => delete nodeMetricsCache[name]);
+  Object.keys(nodeDrainPreflightCache).forEach((name) => delete nodeDrainPreflightCache[name]);
+  Object.keys(nodeEvacuatePreflightCache).forEach((name) => delete nodeEvacuatePreflightCache[name]);
   if (selectedNode) loadNodeDetail(selectedNode, true);
+  if (selectedNode) loadNodeDrainPreflight(selectedNode, true);
+  if (selectedNode && nodes[selectedNode]?.is_compute) loadNodeEvacuatePreflight(selectedNode, true);
   if (selectedNode && activeTab === 'monitor') loadNodeMetrics(selectedNode, true);
   setNodeListRefreshing(true);
   wsSend({ action: 'refresh' });
@@ -103,7 +111,7 @@ function migrateInstance(instanceId) {
 function actionDrainOrUndrain() {
   if (!selectedNode) return;
   const nd = nodes[selectedNode]; if (!nd) return;
-  const action = (nd.k8s_cordoned || nd.compute_status === 'disabled') ? 'undrain' : 'drain_quick';
+  const action = (nd.k8s_drain_status !== 'clear' || nd.k8s_cordoned) ? 'undrain' : 'drain_quick';
   wsSend({ action, node: selectedNode });
 }
 

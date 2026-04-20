@@ -13,20 +13,14 @@ def is_ready_for_reboot(state: NodeState) -> tuple[bool, str]:
     if state.phase in (NodePhase.RUNNING, NodePhase.REBOOTING, NodePhase.UNDRAINING):
         return False, "Cannot reboot while an operation is in progress."
 
-    if not state.k8s_cordoned:
-        return False, "Node must be cordoned and drained before reboot."
+    if state.effective_k8s_drain_status() != "drained":
+        return False, "Kubernetes drain must be completed before reboot."
 
     if not state.is_compute:
         return True, ""
 
-    if state.compute_status != "disabled":
-        return False, "Nova compute service must be disabled before reboot."
-
-    if state.vm_count is None or state.amphora_count is None:
-        return False, "VM evacuation state is unknown; complete evacuation before reboot."
-
-    if state.vm_count != 0 or state.amphora_count != 0:
-        return False, "Compute node must be drained of VMs and pods before reboot."
+    if state.effective_nova_evacuation_status() != "evacuated":
+        return False, "Nova evacuation must be completed before reboot."
 
     return True, ""
 

@@ -415,8 +415,14 @@ def drain_node(
     def is_terminal(pod) -> bool:
         return pod.status.phase in ("Succeeded", "Failed")
 
+    def owner_kinds(pod) -> list[str]:
+        return [ref.kind for ref in (pod.metadata.owner_references or [])]
+
     def is_daemonset_pod(pod) -> bool:
-        return any(ref.kind == "DaemonSet" for ref in (pod.metadata.owner_references or []))
+        return "DaemonSet" in owner_kinds(pod)
+
+    def is_statefulset_pod(pod) -> bool:
+        return "StatefulSet" in owner_kinds(pod)
 
     def is_mirror_pod(pod) -> bool:
         annotations = pod.metadata.annotations or {}
@@ -428,6 +434,7 @@ def drain_node(
     to_evict = []
     skipped_ds = 0
     blocked_mirror: list[str] = []
+    blocked_stateful: list[str] = []
 
     for pod in pods.items:
         if is_terminal(pod):
@@ -437,13 +444,22 @@ def drain_node(
             continue
         if is_daemonset_pod(pod):
             skipped_ds += 1
-        else:
-            to_evict.append(pod)
+            continue
+        if is_statefulset_pod(pod):
+            blocked_stateful.append(pod_ref(pod))
+            continue
+        to_evict.append(pod)
 
     if blocked_mirror:
         refs = ", ".join(blocked_mirror)
         raise RuntimeError(
             f"Static/mirror pod(s) block drain on '{name}': {refs}"
+        )
+
+    if blocked_stateful:
+        refs = ", ".join(blocked_stateful)
+        raise RuntimeError(
+            f"StatefulSet pod(s) block drain on '{name}': {refs}"
         )
 
     log(
@@ -506,6 +522,12 @@ def drain_node(
             and not is_daemonset_pod(p)
             and not is_mirror_pod(p)
         ]
+        blocking_stateful = [p for p in non_ds_alive if is_statefulset_pod(p)]
+        if blocking_stateful:
+            refs = ", ".join(pod_ref(p) for p in blocking_stateful)
+            raise RuntimeError(
+                f"StatefulSet pod(s) block drain on '{name}': {refs}"
+            )
         if not non_ds_alive:
             log(f"All pods drained from '{name}'")
             return
@@ -521,3 +543,95 @@ def drain_node(
         details.append(f"remaining: {', '.join(remaining_refs)}")
     suffix = f" ({'; '.join(details)})" if details else ""
     raise RuntimeError(f"Drain timeout reached for '{name}'{suffix}")
+
+
+def get_drain_preflight(
+    node_name: str,
+    auth: K8sAuth | None = None,
+) -> dict:
+    """Classify pods on a node according to Drain's Kubernetes-only policy."""
+    v1 = client.CoreV1Api(_api_client(auth))
+    raw = v1.list_pod_for_all_namespaces(field_selector=f"spec.nodeName={node_name}")
+
+    def pod_ref(pod) -> str:
+        return f"{pod.metadata.namespace}/{pod.metadata.name}"
+
+    def owners(pod) -> list:
+        return list(pod.metadata.owner_references or [])
+
+    def owner_kinds(pod) -> list[str]:
+        return [getattr(ref, "kind", "") or "" for ref in owners(pod)]
+
+    def owner_label(pod) -> str:
+        refs = owners(pod)
+        if not refs:
+            return "Pod"
+        kind = getattr(refs[0], "kind", "") or "Pod"
+        name = getattr(refs[0], "name", "") or ""
+        if kind == "ReplicaSet":
+            kind = "Deployment"
+        return f"{kind}{f'/{name}' if name else ''}"
+
+    def is_terminal(pod) -> bool:
+        return pod.status.phase in ("Succeeded", "Failed")
+
+    def is_daemonset_pod(pod) -> bool:
+        return "DaemonSet" in owner_kinds(pod)
+
+    def is_statefulset_pod(pod) -> bool:
+        return "StatefulSet" in owner_kinds(pod)
+
+    def is_mirror_pod(pod) -> bool:
+        annotations = pod.metadata.annotations or {}
+        return "kubernetes.io/config.mirror" in annotations
+
+    evictable: list[dict] = []
+    skipped: list[dict] = []
+    blockers: list[dict] = []
+
+    for pod in raw.items:
+        if is_terminal(pod):
+            continue
+        entry = {
+            "namespace": pod.metadata.namespace,
+            "name": pod.metadata.name,
+            "phase": pod.status.phase or "Unknown",
+            "owner": owner_label(pod),
+            "ref": pod_ref(pod),
+        }
+        if is_mirror_pod(pod):
+            entry["reason"] = "Static or mirror pod requires node-local handling"
+            blockers.append(entry)
+            continue
+        if is_daemonset_pod(pod):
+            entry["reason"] = "DaemonSet pods are skipped during drain"
+            skipped.append(entry)
+            continue
+        if is_statefulset_pod(pod):
+            entry["reason"] = "StatefulSet pods require deliberate manual handling"
+            blockers.append(entry)
+            continue
+        evictable.append(entry)
+
+    warning: str | None = None
+    if blockers:
+        warning = f"{len(blockers)} blocking pod(s) require operator action before drain."
+    elif evictable:
+        warning = f"{len(evictable)} pod(s) are eligible for eviction."
+    elif skipped:
+        warning = "Only DaemonSet-managed pods remain; drain can proceed without eviction."
+
+    return {
+        "node": node_name,
+        "evictable": evictable,
+        "skipped": skipped,
+        "blockers": blockers,
+        "summary": {
+            "evictable": len(evictable),
+            "skipped": len(skipped),
+            "blocking": len(blockers),
+            "state": "blocked" if blockers else "ready",
+        },
+        "warning": warning,
+        "error": None,
+    }

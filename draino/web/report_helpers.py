@@ -94,12 +94,13 @@ def _node_blockers(state: NodeState) -> list[str]:
 
 def _node_reviews(state: NodeState) -> list[str]:
     reviews: list[str] = []
-    if not state.k8s_cordoned:
-        reviews.append("kubernetes node is not cordoned")
+    k8s_status = state.effective_k8s_drain_status()
+    if k8s_status != "drained":
+        reviews.append("kubernetes drain is not complete")
     if any((taint.get("effect") or "") == "NoSchedule" for taint in (state.k8s_taints or [])):
         reviews.append("NoSchedule taint is present")
-    if state.is_compute and state.compute_status != "disabled":
-        reviews.append("nova compute service is not disabled")
+    if state.is_compute and state.effective_nova_evacuation_status() != "evacuated":
+        reviews.append("nova evacuation is not complete")
     if state.reboot_required:
         reviews.append("reboot is required")
     if state.hosts_mariadb:
@@ -110,16 +111,16 @@ def _node_reviews(state: NodeState) -> list[str]:
 
 
 def _in_maintenance_posture(state: NodeState) -> bool:
-    if not state.k8s_cordoned:
-        return False
-    if state.is_compute and state.compute_status != "disabled":
-        return False
-    return True
+    return state.maintenance_ready()
 
 
 def _k8s_status_label(state: NodeState) -> str:
     if not state.k8s_ready:
         return "not-ready"
+    if state.effective_k8s_drain_status() == "drained":
+        return "drained"
+    if state.effective_k8s_drain_status() == "blocked":
+        return "drain-blocked"
     if state.k8s_cordoned:
         return "cordoned"
     return "ready"
@@ -128,6 +129,11 @@ def _k8s_status_label(state: NodeState) -> str:
 def _nova_status_label(state: NodeState) -> str:
     if not state.is_compute:
         return "-"
+    evac = state.effective_nova_evacuation_status()
+    if evac == "evacuated":
+        return "evacuated"
+    if evac == "blocked":
+        return "evacuation-blocked"
     return state.compute_status or "unknown"
 
 
@@ -181,6 +187,7 @@ def build_maintenance_readiness_report(server: DrainoServer) -> dict:
             "pod_count": k8s_detail.get("pod_count"),
             "reboot_required": bool(state.reboot_required),
             "node_agent_ready": bool(state.node_agent_ready),
+            "maintenance_ready": state.maintenance_ready(),
             "verdict": verdict,
             "blocking_reason": reason,
             "is_compute": state.is_compute,
@@ -258,6 +265,7 @@ def render_maintenance_readiness_csv(report: dict) -> str:
         "pod_count",
         "reboot_required",
         "node_agent_ready",
+        "maintenance_ready",
         "verdict",
         "blocking_reason",
     ])
@@ -272,6 +280,7 @@ def render_maintenance_readiness_csv(report: dict) -> str:
             item.get("pod_count", ""),
             "yes" if item.get("reboot_required") else "no",
             "yes" if item.get("node_agent_ready") else "no",
+            "yes" if item.get("maintenance_ready") else "no",
             item.get("verdict", ""),
             item.get("blocking_reason", ""),
         ])
@@ -295,13 +304,13 @@ def _capacity_status(state: NodeState) -> tuple[str, str]:
     reviews: list[str] = []
     if state.is_edge:
         reviews.append("hosts OVN edge/gateway responsibilities")
-    if not state.k8s_cordoned:
-        reviews.append("kubernetes node is not cordoned")
-    if state.compute_status != "disabled":
-        reviews.append("nova compute service is not disabled")
+    if state.effective_k8s_drain_status() != "drained":
+        reviews.append("kubernetes drain is not complete")
+    if state.effective_nova_evacuation_status() != "evacuated":
+        reviews.append("nova evacuation is not complete")
     if reviews:
         return ("review", "; ".join(reviews))
-    return ("drain-safe", "host is in maintenance posture")
+    return ("drain-safe", "host is ready for maintenance")
 
 
 def _usage_percent(used: int | None, total: int | None) -> float | None:

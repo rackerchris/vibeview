@@ -64,6 +64,7 @@ def test_reboot_request_requires_node_to_be_drained(tmp_path):
         vm_count=2,
         amphora_count=0,
     )
+    state.k8s_drain_status = "drained"
     server.node_states["node-1"] = state
 
     pushed: list[dict] = []
@@ -74,7 +75,7 @@ def test_reboot_request_requires_node_to_be_drained(tmp_path):
     assert pushed == [{
         "type": "log",
         "node": "node-1",
-        "message": "Compute node must be drained of VMs and pods before reboot.",
+        "message": "Nova evacuation must be completed before reboot.",
         "color": "warn",
     }]
 

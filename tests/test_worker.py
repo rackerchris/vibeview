@@ -3,7 +3,6 @@ from __future__ import annotations
 from draino import worker
 from draino.models import NodePhase, NodeState, StepStatus
 from draino.operations.k8s_ops import K8sAuth
-from draino.operations.openstack_ops import OpenStackAuth
 
 
 def _fake_clock(*values: float):
@@ -38,22 +37,10 @@ def test_run_drain_quick_propagates_session_auth(monkeypatch):
     state.init_quick_drain_steps(is_compute=True)
 
     k8s_auth = K8sAuth(server="https://cluster.example", token="token-1")
-    os_auth = OpenStackAuth(
-        auth_url="https://keystone.example/v3",
-        username="ops",
-        password="secret",
-        project_name="admin",
-    )
-
     monkeypatch.setattr(
         worker.k8s_ops,
         "cordon_node",
         lambda name, log, auth=None: events.append(("cordon", auth)),
-    )
-    monkeypatch.setattr(
-        worker.openstack_ops,
-        "disable_compute_service",
-        lambda hypervisor, log, auth=None: events.append(("disable", auth)),
     )
     monkeypatch.setattr(
         worker.k8s_ops,
@@ -66,34 +53,22 @@ def test_run_drain_quick_propagates_session_auth(monkeypatch):
         update_cb=lambda: None,
         log_cb=lambda msg: None,
         k8s_auth=k8s_auth,
-        openstack_auth=os_auth,
     )
 
-    assert events == [("cordon", k8s_auth), ("disable", os_auth), ("drain", k8s_auth)]
+    assert events == [("cordon", k8s_auth), ("drain", k8s_auth)]
     assert state.phase == NodePhase.IDLE
     assert state.k8s_cordoned is True
-    assert state.compute_status == "disabled"
+    assert state.k8s_drain_status == "drained"
+    assert state.compute_status is None
 
 
 def test_run_undrain_propagates_session_auth(monkeypatch):
     events: list[tuple[str, object]] = []
     state = NodeState(k8s_name="node-1", hypervisor="hv-1", is_compute=True, k8s_cordoned=True)
-    state.compute_status = "disabled"
+    state.k8s_drain_status = "drained"
     state.init_undrain_steps(is_compute=True)
 
     k8s_auth = K8sAuth(server="https://cluster.example", token="token-1")
-    os_auth = OpenStackAuth(
-        auth_url="https://keystone.example/v3",
-        username="ops",
-        password="secret",
-        project_name="admin",
-    )
-
-    monkeypatch.setattr(
-        worker.openstack_ops,
-        "enable_compute_service",
-        lambda hypervisor, log, auth=None: events.append(("enable", auth)),
-    )
     monkeypatch.setattr(
         worker.k8s_ops,
         "uncordon_node",
@@ -105,13 +80,12 @@ def test_run_undrain_propagates_session_auth(monkeypatch):
         update_cb=lambda: None,
         log_cb=lambda msg: None,
         k8s_auth=k8s_auth,
-        openstack_auth=os_auth,
     )
 
-    assert events == [("enable", os_auth), ("uncordon", k8s_auth)]
+    assert events == [("uncordon", k8s_auth)]
     assert state.phase == NodePhase.IDLE
     assert state.k8s_cordoned is False
-    assert state.compute_status == "up"
+    assert state.k8s_drain_status == "clear"
 
 
 def test_run_reboot_uncordons_node_after_return(monkeypatch):
@@ -183,3 +157,50 @@ def test_run_reboot_fails_if_auto_uncordon_fails(monkeypatch):
     assert state.phase == NodePhase.ERROR
     assert state.k8s_cordoned is True
     assert state.get_step("uncordon").status == StepStatus.FAILED
+
+
+def test_run_workflow_evacuates_nova_only(monkeypatch):
+    events: list[tuple[str, object]] = []
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", is_compute=True, k8s_cordoned=True)
+
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "disable_compute_service",
+        lambda hypervisor, log, auth=None: events.append(("disable", auth)),
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "list_servers_on_host",
+        lambda hypervisor, log, auth=None: [],
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "get_amphora_lb_mapping",
+        lambda log, auth=None: {},
+    )
+    monkeypatch.setattr(
+        worker.openstack_ops,
+        "count_servers_on_host",
+        lambda hypervisor, auth=None: 0,
+    )
+    monkeypatch.setattr(
+        worker.k8s_ops,
+        "cordon_node",
+        lambda name, log, auth=None: (_ for _ in ()).throw(AssertionError("evacuate should not cordon kubernetes")),
+    )
+    monkeypatch.setattr(
+        worker.k8s_ops,
+        "drain_node",
+        lambda name, log, auth=None: (_ for _ in ()).throw(AssertionError("evacuate should not drain kubernetes")),
+    )
+
+    worker.run_workflow(
+        state,
+        update_cb=lambda: None,
+        log_cb=lambda msg: None,
+    )
+
+    assert events == [("disable", None)]
+    assert state.phase == NodePhase.COMPLETE
+    assert state.k8s_cordoned is True
+    assert state.nova_evacuation_status == "evacuated"

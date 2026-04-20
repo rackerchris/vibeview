@@ -54,7 +54,8 @@ function renderConfigureTab(nd) {
           <tr><td>vSphere Cluster / DRS</td><td>Availability Zone + Nova Scheduler</td></tr>
           <tr><td>ESXi Host</td><td>Nova Hypervisor + K8s Node (same physical machine)</td></tr>
           <tr><td>VM</td><td>Nova Instance (QEMU/KVM) or K8s Pod</td></tr>
-          <tr><td>Enter Maintenance Mode</td><td>Disable Nova service + Cordon K8s + Drain pods</td></tr>
+          <tr><td>Drain</td><td>Cordon K8s + drain drain-safe pods</td></tr>
+          <tr><td>Evacuate</td><td>Disable Nova service + evacuate instances</td></tr>
           <tr><td>vMotion (live migration)</td><td>Nova live-migrate</td></tr>
           <tr><td>vApp</td><td>Helm Chart / K8s Deployment</td></tr>
           <tr><td>VM Template</td><td>Glance Image</td></tr>

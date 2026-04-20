@@ -14,11 +14,12 @@ def test_compute_node_requires_full_evacuation_before_reboot():
         vm_count=1,
         amphora_count=0,
     )
+    state.k8s_drain_status = "drained"
 
     ready, detail = reboot.is_ready_for_reboot(state)
 
     assert ready is False
-    assert "drained of VMs and pods" in detail
+    assert "Nova evacuation" in detail
 
 
 def test_non_compute_node_can_reboot_after_cordon():
@@ -28,11 +29,26 @@ def test_non_compute_node_can_reboot_after_cordon():
         is_compute=False,
         k8s_cordoned=True,
     )
+    state.k8s_drain_status = "drained"
 
     ready, detail = reboot.is_ready_for_reboot(state)
 
     assert ready is True
     assert detail == ""
+
+
+def test_blocked_nova_evacuation_status_is_preserved_with_instances_remaining():
+    state = NodeState(
+        k8s_name="node-3",
+        hypervisor="hv-3",
+        is_compute=True,
+        compute_status="disabled",
+        vm_count=2,
+        amphora_count=0,
+    )
+    state.nova_evacuation_status = "blocked"
+
+    assert state.effective_nova_evacuation_status() == "blocked"
 
 
 def test_issue_reboot_uses_node_agent(monkeypatch):

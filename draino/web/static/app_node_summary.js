@@ -6,12 +6,37 @@ function renderSummaryTab(nd) {
   let h = '';
   const det = nodeDetailCache[nd.k8s_name] || {};
   const detLoading = det.loading;
+  const k8sDrainStatus = nd.k8s_drain_status || 'clear';
+  const novaEvacStatus = nd.nova_evacuation_status || 'clear';
+  const maintenanceLabel = nd.maintenance_ready
+    ? 'Ready for Maintenance'
+    : k8sDrainStatus !== 'drained'
+      ? 'Not Ready: Kubernetes drain incomplete'
+      : nd.is_compute && novaEvacStatus !== 'evacuated'
+        ? 'Not Ready: Nova evacuation incomplete'
+        : 'Not Ready for Maintenance';
+  const drainPreflight = nodeDrainPreflightCache[nd.k8s_name] || { loading: true, summary: {}, evictable: [], skipped: [], blockers: [] };
+  const evacuatePreflight = nodeEvacuatePreflightCache[nd.k8s_name] || { loading: nd.is_compute, summary: {}, items: [] };
+
+  function preflightCountLine(label, value, tone = '') {
+    return `<div class="mrow"><span class="ml">${esc(label)}</span><span class="mv ${tone}">${esc(String(value ?? 0))}</span></div>`;
+  }
+
+  function preflightPodList(title, items, emptyLabel, tone = '') {
+    if (!items?.length) {
+      return `<div class="mrow"><span class="ml">${esc(title)}</span><span class="mv">${esc(emptyLabel)}</span></div>`;
+    }
+    const names = items.slice(0, 3).map(item => `${item.namespace}/${item.name}`).join(', ');
+    const more = items.length > 3 ? ` +${items.length - 3} more` : '';
+    return `<div class="mrow"><span class="ml">${esc(title)}</span><span class="mv ${tone}" title="${esc(items.map(item => `${item.ref} (${item.owner})`).join('\n'))}">${esc(names + more)}</span></div>`;
+  }
 
   h += `<div class="concept-map">
     <strong>💡 VMware → OpenStack/K8s quick reference:</strong>
     <div class="cm-grid">
       <span class="cm-from">ESXi Host</span><span class="cm-arrow">→</span><span class="cm-to">Nova Hypervisor + K8s Node</span>
-      <span class="cm-from">Enter Maintenance Mode</span><span class="cm-arrow">→</span><span class="cm-to">Disable Nova + Cordon + Drain pods</span>
+      <span class="cm-from">Drain</span><span class="cm-arrow">→</span><span class="cm-to">Cordon + drain Kubernetes pods</span>
+      <span class="cm-from">Evacuate</span><span class="cm-arrow">→</span><span class="cm-to">Disable Nova + evacuate instances</span>
       <span class="cm-from">vMotion</span><span class="cm-arrow">→</span><span class="cm-to">Nova Live Migration</span>
       <span class="cm-from">VM</span><span class="cm-arrow">→</span><span class="cm-to">Nova Instance (QEMU/KVM) or K8s Pod</span>
     </div>
@@ -67,15 +92,34 @@ function renderSummaryTab(nd) {
   if (nd.phase === 'idle' && nd.steps?.length) {
     if (nd.reboot_downtime != null)
       h += `<div class="reboot-complete">✓ Reboot complete — total downtime: ${Math.round(nd.reboot_downtime)}s</div>`;
-    if (nd.k8s_cordoned || nd.compute_status === 'disabled')
-      h += `<div class="idle-hint">Node is drained — click <strong>Drain (Undrain)</strong> to re-enable.</div>`;
+    if (k8sDrainStatus !== 'clear' || nd.k8s_cordoned)
+      h += `<div class="idle-hint">Kubernetes drain posture is active — click <strong>Drain</strong> again to uncordon.</div>`;
   }
+
+  h += `<div class="runtime-note" style="margin-bottom:10px">${esc(maintenanceLabel)}</div>`;
 
   const k8sd = det.k8s || {};
   const novd = det.nova || {};
   const hwd = det.hw || {};
 
   h += `<div class="summary-grid">`;
+
+  h += `<div class="card">
+    <div class="card-title">Drain Preflight</div>
+    <div class="card-body">
+      ${drainPreflight.loading ? `<div class="runtime-note"><span class="spinner">⟳</span> Checking Kubernetes drain eligibility…</div>` : ''}
+      ${drainPreflight.error ? `<div class="err-chip">⚠ ${esc(drainPreflight.error)}</div>` : ''}
+      ${!drainPreflight.loading && !drainPreflight.error ? `
+        ${preflightCountLine('Evictable pods', drainPreflight.summary?.evictable || 0)}
+        ${preflightCountLine('DaemonSets skipped', drainPreflight.summary?.skipped || 0)}
+        ${preflightCountLine('Blocking pods', drainPreflight.summary?.blocking || 0, (drainPreflight.summary?.blocking || 0) > 0 ? 'red' : '')}
+        ${preflightPodList('Blockers', drainPreflight.blockers, 'none', (drainPreflight.blockers || []).length ? 'red' : '')}
+        ${preflightPodList('Skipped', drainPreflight.skipped, 'none')}
+        ${preflightPodList('First evictions', drainPreflight.evictable, 'none')}
+        ${drainPreflight.warning ? `<div class="runtime-note" style="margin-top:8px">${esc(drainPreflight.warning)}</div>` : ''}
+      ` : ''}
+    </div>
+  </div>`;
 
   if (nd.is_compute) {
     const nc = { up:'green', disabled:'yellow', down:'red' }[nd.compute_status] || 'gray';
@@ -94,12 +138,34 @@ function renderSummaryTab(nd) {
       <div class="card-title">Nova Compute <span class="hint">VMware Cluster</span></div>
       <div class="card-body">
         <div class="mrow"><span class="ml">Service state</span><span class="mv ${nc}">${esc(nl)}</span></div>
+        <div class="mrow"><span class="ml">Evacuation</span><span class="mv ${novaEvacStatus === 'evacuated' ? 'green' : novaEvacStatus === 'blocked' ? 'red' : novaEvacStatus === 'in_progress' ? 'yellow' : ''}">${esc(novaEvacStatus.replace('_', ' '))}</span></div>
         <div class="mrow"><span class="ml">Instances <span class="hint">VMs</span></span><span class="mv">${v}</span></div>
         <div class="mrow"><span class="ml">Amphora LBs <span class="hint">NSX LB</span></span><span class="mv ${a > 0 ? 'yellow' : ''}">${a}</span></div>
+        ${nd.nova_evacuation_detail ? `<div class="runtime-note" style="margin-top:8px">${esc(nd.nova_evacuation_detail)}</div>` : ''}
         ${vcpuTotal != null ? `<div class="mrow"><span class="ml">vCPUs</span><span class="mv">${vcpuUsed ?? '…'} / ${vcpuTotal}</span></div>` : detLoading ? `<div class="mrow"><span class="ml">vCPUs</span><span class="mv dim"><span class="spinner">⟳</span></span></div>` : ''}
         ${ramTotal != null ? `<div class="mrow"><span class="ml">RAM</span><span class="mv">${ramUsed != null ? Math.round(ramUsed/1024) : '…'} / ${Math.round(ramTotal/1024)} GB</span></div>` : ''}
         ${vcpuTotal != null && vcpuPct != null ? `<div class="pbw"><div class="pb-label"><span>vCPU allocation</span><span>${vcpuPct}%</span></div><div class="pb-track"><div class="pb-fill ${vcpuCls}" style="width:${vcpuPct}%"></div></div></div>` : ''}
         ${ramTotal != null && ramPct != null ? `<div class="pbw"><div class="pb-label"><span>RAM allocation</span><span>${ramPct}%</span></div><div class="pb-track"><div class="pb-fill ${ramCls}" style="width:${ramPct}%"></div></div></div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  if (nd.is_compute) {
+    h += `<div class="card">
+      <div class="card-title">Evacuation Preflight</div>
+      <div class="card-body">
+        ${evacuatePreflight.loading ? `<div class="runtime-note"><span class="spinner">⟳</span> Checking Nova evacuation scope…</div>` : ''}
+        ${evacuatePreflight.error ? `<div class="err-chip">⚠ ${esc(evacuatePreflight.error)}</div>` : ''}
+        ${!evacuatePreflight.loading && !evacuatePreflight.error ? `
+          ${preflightCountLine('Instances on host', evacuatePreflight.summary?.instances || 0)}
+          ${preflightCountLine('Regular VMs', evacuatePreflight.summary?.regular_vms || 0)}
+          ${preflightCountLine('Amphora', evacuatePreflight.summary?.amphora || 0, (evacuatePreflight.summary?.amphora || 0) > 0 ? 'yellow' : '')}
+          ${preflightCountLine('Volume-backed', evacuatePreflight.summary?.volume_backed || 0)}
+          ${preflightCountLine('Ephemeral', evacuatePreflight.summary?.ephemeral || 0, (evacuatePreflight.summary?.ephemeral || 0) > 0 ? 'yellow' : '')}
+          ${preflightCountLine('Active', evacuatePreflight.summary?.active || 0)}
+          ${evacuatePreflight.items?.length ? `<div class="mrow"><span class="ml">Sample instances</span><span class="mv" title="${esc(evacuatePreflight.items.map(item => `${item.name} (${item.status})`).join('\n'))}">${esc(evacuatePreflight.items.slice(0, 3).map(item => item.name).join(', '))}${evacuatePreflight.items.length > 3 ? esc(` +${evacuatePreflight.items.length - 3} more`) : ''}</span></div>` : `<div class="mrow"><span class="ml">Sample instances</span><span class="mv">none</span></div>`}
+          ${evacuatePreflight.warning ? `<div class="runtime-note" style="margin-top:8px">${esc(evacuatePreflight.warning)}</div>` : ''}
+        ` : ''}
       </div>
     </div>`;
   }
@@ -116,8 +182,10 @@ function renderSummaryTab(nd) {
       <div class="card-title">Kubernetes Node <span class="hint">ESXi Host</span></div>
       <div class="card-body">
         <div class="mrow"><span class="ml">Status</span><span class="mv ${rc}">${rl}</span></div>
-        <div class="mrow"><span class="ml">Cordoned <span class="hint">In Maintenance</span></span><span class="mv ${nd.k8s_cordoned?'yellow':'green'}">${nd.k8s_cordoned?'Yes':'No'}</span></div>
+        <div class="mrow"><span class="ml">Cordoned <span class="hint">Scheduling blocked</span></span><span class="mv ${nd.k8s_cordoned?'yellow':'green'}">${nd.k8s_cordoned?'Yes':'No'}</span></div>
+        <div class="mrow"><span class="ml">Drain</span><span class="mv ${k8sDrainStatus === 'drained' ? 'green' : k8sDrainStatus === 'blocked' ? 'red' : k8sDrainStatus === 'in_progress' ? 'yellow' : ''}">${esc(k8sDrainStatus.replace('_', ' '))}</span></div>
         <div class="mrow"><span class="ml">Role</span><span class="mv">${esc(roles)}</span></div>
+        ${nd.k8s_drain_detail ? `<div class="runtime-note" style="margin-top:8px">${esc(nd.k8s_drain_detail)}</div>` : ''}
         ${nd.is_etcd ? `<div class="mrow"><span class="ml">etcd</span><span class="mv red">member</span></div>` : ''}
         ${podCount != null ? `<div class="mrow"><span class="ml">Running pods</span><span class="mv">${podCount}${podCap ? ' / ' + podCap : ''}</span></div>` : detLoading ? `<div class="mrow"><span class="ml">Pods</span><span class="mv dim"><span class="spinner">⟳</span></span></div>` : ''}
         ${k8sd.kubelet_version ? `<div class="mrow"><span class="ml">Kubelet</span><span class="mv dim">${esc(k8sd.kubelet_version)}</span></div>` : ''}
@@ -217,16 +285,16 @@ function renderSummaryTab(nd) {
 
   if (nd.is_compute && nd.phase === 'idle' && (!nd.steps || !nd.steps.length)) {
     h += hasOpenStackAuth()
-      ? `<div class="idle-hint">Click <strong>Evacuate</strong> to begin the full evacuation workflow. Use the <strong>Instances</strong> and <strong>Pods</strong> tabs to inspect workloads on this hypervisor.</div>`
+      ? `<div class="idle-hint">Click <strong>Evacuate</strong> to disable Nova and evacuate instances from this hypervisor. Use <strong>Drain</strong> separately for Kubernetes workloads.</div>`
       : `<div class="idle-hint">OpenStack credentials are required for instance evacuation workflows. Use the <strong>Instances</strong> and <strong>Pods</strong> tabs to inspect workloads on this hypervisor.</div>`;
-    if (nd.k8s_cordoned || nd.compute_status === 'disabled')
-      h += `<div class="idle-hint">Node is partially drained — click <strong>Drain (Undrain)</strong> to re-enable.</div>`;
+    if (k8sDrainStatus !== 'clear' || nd.k8s_cordoned)
+      h += `<div class="idle-hint">Kubernetes drain posture is active — click <strong>Drain</strong> again to uncordon.</div>`;
   }
 
   if (!nd.is_compute && nd.phase === 'idle' && (!nd.steps || !nd.steps.length)) {
     h += `<div style="color:var(--dim);font-size:12px;padding:4px 0">Non-compute node — no OpenStack evacuation required.</div>`;
     if (nd.k8s_cordoned)
-      h += `<div class="idle-hint">Node is cordoned — click <strong>Drain (Undrain)</strong> to uncordon.</div>`;
+      h += `<div class="idle-hint">Node is cordoned — click <strong>Drain</strong> again to uncordon.</div>`;
   }
 
   document.getElementById('summary-content').innerHTML = h;

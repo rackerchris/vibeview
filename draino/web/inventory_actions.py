@@ -74,12 +74,14 @@ class InventoryActionsMixin:
         state.log_buffer = []
         state.preflight_instances = []
         state.preflight_loading = False
+        state.nova_evacuation_status = "in_progress"
+        state.nova_evacuation_detail = "starting nova evacuation"
         state.init_steps()
 
         audit_cb = self._audit_cb("evacuation", node_name)
         audit_cb("started")
         self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
-        self._push({"type": "log", "node": node_name, "message": f"Starting evacuation of {node_name}…", "color": "important"})
+        self._push({"type": "log", "node": node_name, "message": f"Starting Nova evacuation of {node_name}…", "color": "important"})
 
         threading.Thread(
             target=worker.run_workflow,
@@ -93,12 +95,14 @@ class InventoryActionsMixin:
             return
 
         state.phase = NodePhase.RUNNING
+        state.k8s_drain_status = "in_progress"
+        state.k8s_drain_detail = "starting kubernetes drain"
         state.init_quick_drain_steps(state.is_compute)
 
         audit_cb = self._audit_cb("drain_quick", node_name)
         audit_cb("started")
         self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
-        self._push({"type": "log", "node": node_name, "message": f"Draining {node_name}…", "color": "important"})
+        self._push({"type": "log", "node": node_name, "message": f"Starting Kubernetes drain of {node_name}…", "color": "important"})
 
         threading.Thread(
             target=worker.run_drain_quick,
@@ -112,12 +116,13 @@ class InventoryActionsMixin:
             return
 
         state.phase = NodePhase.UNDRAINING
+        state.k8s_drain_detail = "clearing kubernetes drain posture"
         state.init_undrain_steps(state.is_compute)
 
         audit_cb = self._audit_cb("undrain", node_name)
         audit_cb("started")
         self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
-        self._push({"type": "log", "node": node_name, "message": f"Undraining {node_name}…", "color": "important"})
+        self._push({"type": "log", "node": node_name, "message": f"Clearing Kubernetes drain on {node_name}…", "color": "important"})
 
         threading.Thread(
             target=worker.run_undrain,

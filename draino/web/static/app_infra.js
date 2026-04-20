@@ -27,6 +27,8 @@ function selectNode(name) {
   }
   // Load rich node detail if not already cached
   if (shouldLoadNodeDetail(name)) loadNodeDetail(name);
+  loadNodeDrainPreflight(name);
+  if (nd?.is_compute) loadNodeEvacuatePreflight(name);
   if (activeTab === 'monitor') {
     if (shouldLoadNodeMetrics(name)) loadNodeMetrics(name);
     _ensureNetworkDataLoaded(name);
@@ -37,6 +39,70 @@ function selectNode(name) {
   // Load network config data if Configure tab is active
   if (activeTab === 'configure') _ensureNetworkDataLoaded(name);
   renderInfraDetail();
+}
+
+async function loadNodeDrainPreflight(name, force = false) {
+  const cached = nodeDrainPreflightCache[name];
+  if (!force && cached?.loading) return;
+  nodeDrainPreflightCache[name] = { ...(cached || {}), loading: true, error: null };
+  if (selectedNode === name && nodes[name]) renderInfraDetail();
+  try {
+    const qs = force ? '?refresh=1' : '';
+    const resp = await fetch(`/api/nodes/${encodeURIComponent(name)}/drain-preflight${qs}`);
+    const json = await resp.json();
+    nodeDrainPreflightCache[name] = {
+      loading: false,
+      summary: json.summary || {},
+      evictable: json.evictable || [],
+      skipped: json.skipped || [],
+      blockers: json.blockers || [],
+      warning: json.warning || '',
+      error: json.error || null,
+      fetchedAt: new Date(),
+    };
+  } catch (e) {
+    nodeDrainPreflightCache[name] = {
+      loading: false,
+      summary: {},
+      evictable: [],
+      skipped: [],
+      blockers: [],
+      warning: '',
+      error: String(e),
+      fetchedAt: new Date(),
+    };
+  }
+  if (selectedNode === name && nodes[name]) renderInfraDetail();
+}
+
+async function loadNodeEvacuatePreflight(name, force = false) {
+  const cached = nodeEvacuatePreflightCache[name];
+  if (!force && cached?.loading) return;
+  nodeEvacuatePreflightCache[name] = { ...(cached || {}), loading: true, error: null };
+  if (selectedNode === name && nodes[name]) renderInfraDetail();
+  try {
+    const qs = force ? '?refresh=1' : '';
+    const resp = await fetch(`/api/nodes/${encodeURIComponent(name)}/evacuate-preflight${qs}`);
+    const json = await resp.json();
+    nodeEvacuatePreflightCache[name] = {
+      loading: false,
+      summary: json.summary || {},
+      items: json.items || [],
+      warning: json.warning || '',
+      error: json.error || null,
+      fetchedAt: new Date(),
+    };
+  } catch (e) {
+    nodeEvacuatePreflightCache[name] = {
+      loading: false,
+      summary: {},
+      items: [],
+      warning: '',
+      error: String(e),
+      fetchedAt: new Date(),
+    };
+  }
+  if (selectedNode === name && nodes[name]) renderInfraDetail();
 }
 
 function ensureSelectedEtcdHealthCheck() {
@@ -117,8 +183,12 @@ function renderObjHeader(nd) {
   if (nd.phase !== 'idle')
     badges.push(`<span class="badge ${phaseColors[nd.phase]||'gray'}">${phaseLabels[nd.phase]||nd.phase.toUpperCase()}</span>`);
   if      (!nd.k8s_ready)     badges.push(`<span class="badge red">● K8s Not Ready</span>`);
-  else if (nd.k8s_cordoned)   badges.push(`<span class="badge gray">Cordoned</span>`);
+  else if (nd.k8s_cordoned)   badges.push(`<span class="badge gray">CORDONED</span>`);
   else if (nd.phase === 'idle') badges.push(`<span class="badge green">● K8s Ready</span>`);
+  if (nd.k8s_drain_status === 'drained')
+    badges.push(`<span class="badge blue">K8s Drained</span>`);
+  else if (nd.k8s_drain_status === 'blocked')
+    badges.push(`<span class="badge yellow" title="${escAttr(nd.k8s_drain_detail || 'Kubernetes drain blocked')}">Drain Blocked</span>`);
   if (noSched.length)
     badges.push(`<span class="badge red">NoSchedule</span>`);
   if (nd.is_edge)
@@ -134,8 +204,13 @@ function renderObjHeader(nd) {
       badges.push(`<span class="badge ${ncMap[nd.compute_status]||'gray'}">● Nova ${nlMap[nd.compute_status]||nd.compute_status}</span>`);
     else
       badges.push(`<span class="badge gray">Nova …</span>`);
+    if (nd.nova_evacuation_status === 'evacuated')
+      badges.push(`<span class="badge blue">Evacuated</span>`);
+    else if (nd.nova_evacuation_status === 'blocked')
+      badges.push(`<span class="badge yellow" title="${escAttr(nd.nova_evacuation_detail || 'Nova evacuation blocked')}">Evac Blocked</span>`);
     badges.push(`<span class="badge blue">Compute Node</span>`);
   }
+  if (nd.maintenance_ready) badges.push(`<span class="badge green">Ready for Maintenance</span>`);
   if (nd.is_etcd) badges.push(`<span class="tree-badge etcd">etcd</span>`);
   if (nd.hosts_mariadb) badges.push(`<span class="tree-badge mariadb">mariadb</span>`);
   if (nd.is_edge) badges.push(`<span class="tree-badge edge">edge</span>`);

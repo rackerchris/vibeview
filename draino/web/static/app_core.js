@@ -62,6 +62,8 @@ let nodeSortDirection = 'asc';
 // Node detail cache (summary tab)
 const nodeDetailCache = {};   // node_name → { loading, k8s, nova, error }
 const nodeMetricsCache = {};  // node_name → { loading, current, history, error }
+const nodeDrainPreflightCache = {}; // node_name → { loading, summary, evictable, skipped, blockers, warning, error }
+const nodeEvacuatePreflightCache = {}; // node_name → { loading, summary, items, warning, error }
 const nodeNetStatsCache = {}; // node_name → { loading, interfaces, error, fetchedAt }
 const nodeIrqBalanceCache = {}; // node_name → { loading, interfaces, error, fetchedAt }
 const nodeSarTrendsCache = {}; // node_name → { loading, summary, interfaces, error, fetchedAt }

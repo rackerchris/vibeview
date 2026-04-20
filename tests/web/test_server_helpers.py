@@ -516,12 +516,16 @@ def test_serialise_includes_k8s_taints():
     state.k8s_taints = [{"key": "key", "value": "value", "effect": "NoSchedule"}]
     state.is_edge = True
     state.node_agent_ready = False
+    state.k8s_cordoned = True
+    state.k8s_drain_status = "drained"
 
     data = web_server._serialise(state)
 
     assert data["k8s_taints"] == [{"key": "key", "value": "value", "effect": "NoSchedule"}]
     assert data["is_edge"] is True
     assert data["node_agent_ready"] is False
+    assert data["k8s_drain_status"] == "drained"
+    assert data["maintenance_ready"] is True
 
 
 def test_normalise_image_digest_handles_kubernetes_image_ids():
