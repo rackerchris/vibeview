@@ -134,10 +134,18 @@ def list_k8s_cluster_networks(auth: K8sAuth | None = None) -> list[dict]:
 
 def list_k8s_network_domains(auth: K8sAuth | None = None) -> list[dict]:
     _sync_inventory_modules()
-    _resources.list_k8s_services = list_k8s_services
-    _resources.list_k8s_gateways = list_k8s_gateways
-    _resources.list_k8s_httproutes = list_k8s_httproutes
-    return _resources.list_k8s_network_domains(auth=auth)
+    previous_services = _resources.list_k8s_services
+    previous_gateways = _resources.list_k8s_gateways
+    previous_httproutes = _resources.list_k8s_httproutes
+    try:
+        _resources.list_k8s_services = list_k8s_services
+        _resources.list_k8s_gateways = list_k8s_gateways
+        _resources.list_k8s_httproutes = list_k8s_httproutes
+        return _resources.list_k8s_network_domains(auth=auth)
+    finally:
+        _resources.list_k8s_services = previous_services
+        _resources.list_k8s_gateways = previous_gateways
+        _resources.list_k8s_httproutes = previous_httproutes
 
 
 def list_k8s_kubeovn_vpcs(auth: K8sAuth | None = None) -> list[dict]:

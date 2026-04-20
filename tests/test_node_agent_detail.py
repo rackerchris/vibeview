@@ -6,7 +6,7 @@ import urllib.error
 from types import SimpleNamespace
 
 from draino import node_agent_client, node_agent_host_ops, node_agent_metrics_ops
-from draino.operations import k8s_ops, ovn_ops
+from draino.operations import k8s_inventory_utils, k8s_ops, ovn_ops
 
 
 def test_get_node_hardware_info_uses_node_agent(monkeypatch):
@@ -137,8 +137,8 @@ def test_get_mariadb_node_names_only_matches_mariadb_cluster_pods(monkeypatch):
         def list_pod_for_all_namespaces(self):
             return SimpleNamespace(items=pods)
 
-    monkeypatch.setattr(k8s_ops, "_api_client", lambda auth=None: object())
-    monkeypatch.setattr(k8s_ops.client, "CoreV1Api", FakeCoreV1Api)
+    monkeypatch.setattr(k8s_inventory_utils, "_api_client", lambda auth=None: object())
+    monkeypatch.setattr(k8s_inventory_utils.client, "CoreV1Api", FakeCoreV1Api)
 
     result = k8s_ops.get_mariadb_node_names()
 

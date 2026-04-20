@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -130,7 +131,7 @@ def test_get_k8s_pvc_workload_summary_cross_references_longhorn_replicas(monkeyp
         status=SimpleNamespace(phase="Running"),
     )
     pvc = SimpleNamespace(
-        metadata=SimpleNamespace(namespace="db", name="data-mariadb-0"),
+        metadata=SimpleNamespace(namespace="db", name="data-mariadb-0", creation_timestamp=None),
         spec=SimpleNamespace(volume_name="pvc-123", storage_class_name="longhorn-repl3", access_modes=["RWO"]),
         status=SimpleNamespace(phase="Bound", capacity={"storage": "200Gi"}),
     )
@@ -420,7 +421,7 @@ def test_list_k8s_services_and_vpcs_include_identity_hints(monkeypatch):
                     "neutron.openstack.org/vip": "172.18.0.50",
                 },
                 labels={"app": "frontend"},
-                creation_timestamp="2026-04-15T03:00:00Z",
+                creation_timestamp=datetime(2026, 4, 15, 3, 0, 0, tzinfo=timezone.utc),
             )
             self.spec = SimpleNamespace(
                 type="LoadBalancer",
@@ -477,7 +478,7 @@ def test_list_k8s_services_and_vpcs_include_identity_hints(monkeypatch):
         },
         "labels": {"app": "frontend"},
         "identity_hints": ["172.18.0.50", "apps", "kube-ovn", "lb-123", "tenant-a-lb"],
-        "created": "2026-04-15T03:00:00Z",
+        "created": "2026-04-15T03:00:00+00:00",
     }]
     assert vpcs == [{
         "name": "tenant-a",

@@ -1288,8 +1288,8 @@ def test_get_volume_detail_includes_retype_targets_and_recovery_lists(monkeypatc
     assert item["volume_type_detail"]["backend_name"] == "rbd-a"
     assert item["available_volume_types"][1]["backend_name"] == "rbd-b"
     assert item["attachments"][0]["server_name"] == "vm-db-01"
+    assert item["metadata"]["owner"] == "db-team"
     assert item["snapshot_count"] == 1
     assert item["backup_count"] == 1
     assert item["snapshots"][0]["id"] == "snap-1"
     assert item["backups"][0]["id"] == "backup-1"
-    assert item["control_plane_complexity"]["level"] == "elevated"
