@@ -859,7 +859,8 @@ function projectCloneGroupedRows(status = projectCloneState.status) {
       createdImages.length ? createdImages.join(', ') : '',
       createdServers.length ? createdServers.join(', ') : (status?.result?.server_id || ''),
     ].filter(Boolean).join(' · ');
-    const buildFailed = ['create_snapshot', 'create_server', 'wait_server', 'power_off', 'completed'].includes(failureStep);
+    const cloneCompleted = String(status?.state || '').toLowerCase() === 'completed';
+    const buildFailed = !cloneCompleted && ['create_snapshot', 'create_server', 'wait_server', 'power_off'].includes(failureStep);
     addRow({
       key: 'build',
       task: 'Server Build',
@@ -870,8 +871,8 @@ function projectCloneGroupedRows(status = projectCloneState.status) {
         ...(createdImages.length ? [{ kind: 'Snapshot Image', value: createdImages.join(', ') }] : []),
         ...((createdServers.length || status?.result?.server_id) ? [{ kind: 'Server', value: createdServers.join(', ') || status?.result?.server_id || '—' }] : []),
       ],
-      state: buildFailed ? 'failed' : (String(status?.state || '').toLowerCase() === 'completed' ? 'completed' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'running' : 'pending'),
-      statusText: buildFailed ? 'Failed' : (String(status?.state || '').toLowerCase() === 'completed' ? 'Built' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'Building' : 'Pending'),
+      state: buildFailed ? 'failed' : (cloneCompleted ? 'completed' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'running' : 'pending'),
+      statusText: buildFailed ? 'Failed' : (cloneCompleted ? 'Built' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'Building' : 'Pending'),
       error: buildFailed ? failureError : '',
     });
   }
@@ -907,12 +908,19 @@ function projectCloneGroupedRows(status = projectCloneState.status) {
   return rows;
 }
 
+function projectCloneMessageClass() {
+  if (projectCloneState.tone === 'error') return 'clone-workflow-message error';
+  if (projectCloneState.tone === 'warn') return 'clone-workflow-message warn';
+  return 'clone-workflow-message info';
+}
+
 function renderProjectCloneWorkflowPanel() {
   const status = projectCloneState.status;
   if (!status) return '';
   const rows = projectCloneGroupedRows(status);
   const cleanupRows = Array.isArray(status.cleanup_actions) ? status.cleanup_actions : [];
   const residualRows = Array.isArray(status.residual_resources) ? status.residual_resources : [];
+  const currentTask = rows.find((row) => row.state === 'running') || rows.find((row) => row.state === 'failed') || rows.find((row) => row.state === 'completed') || null;
   const summaryResourceCounts = {
     ports: Array.isArray(status.created_resources?.ports) ? status.created_resources.ports.length : 0,
     volumes: Array.isArray(status.created_resources?.volumes) ? status.created_resources.volumes.length : 0,
@@ -920,84 +928,96 @@ function renderProjectCloneWorkflowPanel() {
     floatingIps: Array.isArray(status.created_resources?.floating_ips) ? status.created_resources.floating_ips.length : 0,
   };
   return `
-    <div class="session-panel">
-      <div class="session-panel-head">
-        <div class="session-panel-title">Clone Workflow</div>
-        <div class="session-panel-sub">${esc(String(status.state || 'unknown'))}</div>
-      </div>
-      <div class="session-panel-body">
-        <div class="summary-grid" style="margin-bottom:0">
-          <div class="card">
-            <div class="card-title">Current Task</div>
-            <div class="card-body">
-              <div class="mrow"><span class="ml">Step</span><span class="mv">${esc(status.step_label || '—')}</span></div>
-              <div class="mrow"><span class="ml">State</span><span class="mv">${esc(String(status.state || 'unknown'))}</span></div>
+    <div class="clone-workflow-layout">
+      <div class="card">
+        <div class="card-title">Execution Summary</div>
+        <div class="card-body">
+          <div class="clone-workflow-summary-grid">
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Current Task</div>
+              <div class="clone-workflow-summary-value">${esc(currentTask?.task || status.step_label || '—')}</div>
+              <div class="clone-workflow-summary-sub">${esc(currentTask?.error || status.detail || 'Waiting for clone activity.')}</div>
             </div>
-          </div>
-          <div class="card">
-            <div class="card-title">Created Resources</div>
-            <div class="card-body">
-              <div class="mrow"><span class="ml">Ports</span><span class="mv">${esc(String(summaryResourceCounts.ports))}</span></div>
-              <div class="mrow"><span class="ml">Volumes</span><span class="mv">${esc(String(summaryResourceCounts.volumes))}</span></div>
-              <div class="mrow"><span class="ml">Servers</span><span class="mv">${esc(String(summaryResourceCounts.servers))}</span></div>
-              <div class="mrow"><span class="ml">Floating IPs</span><span class="mv">${esc(String(summaryResourceCounts.floatingIps))}</span></div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Source Flavor</div>
+              <div class="clone-workflow-summary-value">${esc(projectCloneState.source?.flavor?.name || projectCloneState.source?.flavor?.id || '—')}</div>
+              <div class="clone-workflow-summary-sub">${esc(projectCloneFlavorReady(projectCloneState.source) ? 'Resolved before launch.' : 'Flavor is unresolved.')}</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Created Resources</div>
+              <div class="clone-workflow-summary-value">${esc(String(summaryResourceCounts.ports + summaryResourceCounts.volumes + summaryResourceCounts.servers + summaryResourceCounts.floatingIps))}</div>
+              <div class="clone-workflow-summary-sub">${esc(`${summaryResourceCounts.ports} ports, ${summaryResourceCounts.volumes} volumes, ${summaryResourceCounts.servers} server(s), ${summaryResourceCounts.floatingIps} floating IP(s)`)}</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Rollback Outcome</div>
+              <div class="clone-workflow-summary-value">${esc(residualRows.length ? `${residualRows.length} Leftover` : cleanupRows.length ? 'Cleaned Up' : 'Not Needed')}</div>
+              <div class="clone-workflow-summary-sub">${esc(residualRows.length ? 'Operator action still required.' : cleanupRows.length ? 'Automatic rollback completed.' : 'No cleanup has been required.')}</div>
             </div>
           </div>
         </div>
-        <table class="data-table clone-workflow-table" style="margin-bottom:0">
-          <thead>
-            <tr>
-              <th style="width:40%">Task</th>
-              <th style="width:36%">Resource</th>
-              <th style="width:24%">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.length ? rows.map((row) => {
-              return `<tr class="clone-workflow-row clone-workflow-row-${escAttr(row.state)}">
-                <td>
-                  <div class="clone-workflow-task-title">${esc(row.task)}</div>
-                  <div class="clone-workflow-task-sub">${esc(row.description)}</div>
-                  ${row.error ? `<div class="clone-workflow-task-error">${esc(row.error)}</div>` : ''}
-                </td>
-                <td>
-                  ${Array.isArray(row.resourceLines) && row.resourceLines.length
-                    ? row.resourceLines.map((line) => `<div class="clone-workflow-resource-line"><div class="clone-workflow-resource-kind">${esc(line.kind)}</div><div class="mono">${esc(line.value)}</div></div>`).join('')
-                    : `<div class="clone-workflow-resource-kind">${esc(row.resourceKind)}</div><div class="mono">${esc(row.resourceValue)}</div>`}
-                </td>
-                <td><span class="status-pill ${escAttr(row.state === 'completed' ? 'done' : row.state === 'failed' ? 'failed' : row.state === 'running' ? 'running' : row.state === 'skipped' ? 'waiting' : 'waiting')}">${esc(row.statusText)}</span></td>
-              </tr>`;
-            }).join('') : '<tr><td colspan="3" style="color:var(--dim)">No clone workflow events have been recorded yet.</td></tr>'}
-          </tbody>
-        </table>
-        ${cleanupRows.length ? `
-          <div class="clone-workflow-section">
-            <div class="clone-workflow-section-title">Rollback Attempts</div>
-            <table class="data-table" style="margin-bottom:0">
-              <thead><tr><th>Resource</th><th>ID</th><th>Outcome</th></tr></thead>
-              <tbody>
-                ${cleanupRows.map((item) => `<tr>
-                  <td>${esc(item.resource_type || 'resource')}</td>
-                  <td class="mono">${esc(item.resource_id || '—')}</td>
-                  <td>${esc(item.state || 'unknown')}${item.error ? `: ${esc(item.error)}` : ''}</td>
-                </tr>`).join('')}
-              </tbody>
-            </table>
-          </div>` : ''}
-        ${residualRows.length ? `
-          <div class="clone-workflow-section">
-            <div class="clone-workflow-section-title">Leftover Resources</div>
-            <table class="data-table" style="margin-bottom:0">
-              <thead><tr><th>Resource</th><th>ID</th><th>Action</th></tr></thead>
-              <tbody>
-                ${residualRows.map((item) => `<tr>
-                  <td>${esc(item.resource_type || 'resource')}</td>
-                  <td class="mono">${esc(item.resource_id || '—')}</td>
-                  <td><button class="btn" onclick="cleanupProjectCloneResource('${escAttr(status.source_instance_id || projectCloneState.trackedInstanceId || '')}','${escAttr(item.resource_type || '')}','${escAttr(item.resource_id || '')}')">Delete Resource</button></td>
-                </tr>`).join('')}
-              </tbody>
-            </table>
-          </div>` : ''}
+      </div>
+      <div class="card">
+        <div class="card-title">Clone Workflow Table</div>
+        <div class="card-body" style="padding:0">
+          <table class="data-table clone-workflow-table" style="margin-bottom:0">
+            <thead>
+              <tr>
+                <th style="width:40%">Task</th>
+                <th style="width:36%">Resource</th>
+                <th style="width:24%">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.length ? rows.map((row) => {
+                return `<tr class="clone-workflow-row clone-workflow-row-${escAttr(row.state)}">
+                  <td>
+                    <div class="clone-workflow-task-title">${esc(row.task)}</div>
+                    <div class="clone-workflow-task-sub">${esc(row.description)}</div>
+                    ${row.error ? `<div class="clone-workflow-task-error">${esc(row.error)}</div>` : ''}
+                  </td>
+                  <td>
+                    ${Array.isArray(row.resourceLines) && row.resourceLines.length
+                      ? row.resourceLines.map((line) => `<div class="clone-workflow-resource-line"><div class="clone-workflow-resource-kind">${esc(line.kind)}</div><div class="mono">${esc(line.value)}</div></div>`).join('')
+                      : `<div class="clone-workflow-resource-kind">${esc(row.resourceKind)}</div><div class="mono">${esc(row.resourceValue)}</div>`}
+                  </td>
+                  <td><span class="status-pill ${escAttr(row.state === 'completed' ? 'done' : row.state === 'failed' ? 'failed' : row.state === 'running' ? 'running' : row.state === 'skipped' ? 'waiting' : 'waiting')}">${esc(row.statusText)}</span></td>
+                </tr>`;
+              }).join('') : '<tr><td colspan="3" style="color:var(--dim)">No clone workflow events have been recorded yet.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Operator Recovery</div>
+        <div class="card-body">
+          <div class="clone-workflow-notice">
+            The table above identifies the exact failed task and resource IDs. This recovery section only appears when rollback has work to report or leftovers need cleanup.
+          </div>
+          ${cleanupRows.length ? `
+            <div class="clone-workflow-section">
+              <div class="clone-workflow-section-title">Rollback Attempts</div>
+              <table class="data-table" style="margin-bottom:0">
+                <thead><tr><th>Resource</th><th>ID</th><th>Outcome</th></tr></thead>
+                <tbody>
+                  ${cleanupRows.map((item) => `<tr>
+                    <td>${esc(item.resource_type || 'resource')}</td>
+                    <td class="mono">${esc(item.resource_id || '—')}</td>
+                    <td>${esc(item.state || 'unknown')}${item.error ? `: ${esc(item.error)}` : ''}</td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>` : ''}
+          ${residualRows.length ? `
+            <div class="clone-workflow-residual-list">
+              ${residualRows.map((item) => `<div class="clone-workflow-residual-item">
+                <div>
+                  <strong>${esc(`${item.resource_type || 'resource'} ${item.resource_id || ''}`)}</strong>
+                  <span>Rollback could not delete this resource automatically.</span>
+                </div>
+                <button class="btn primary" onclick="cleanupProjectCloneResource('${escAttr(status.source_instance_id || projectCloneState.trackedInstanceId || '')}','${escAttr(item.resource_type || '')}','${escAttr(item.resource_id || '')}')">Delete Resource</button>
+              </div>`).join('')}
+            </div>` : cleanupRows.length ? '<div class="hint">No leftover resources remain after rollback.</div>' : '<div class="hint">No rollback or cleanup actions are currently needed.</div>'}
+        </div>
       </div>
     </div>
   `;
@@ -1200,27 +1220,41 @@ function renderProjectCloneOverlay() {
   });
   const flavor = instance.flavor || {};
   const flavorReady = projectCloneFlavorReady(instance);
-  const statusTone = projectCloneState.tone === 'error' ? 'err-block' : projectCloneState.tone === 'warn' ? 'note' : 'subtle';
   const priorShell = content.querySelector('.project-clone-shell');
   const priorScrollTop = priorShell ? priorShell.scrollTop : 0;
   const focusState = captureProjectCloneFocusState(content);
   if (projectCloneState.mode === 'workflow') {
+    const workflowState = String(projectCloneState.status?.state || 'unknown');
+    const workflowBadge = workflowState === 'completed'
+      ? '<span class="badge green">Completed</span>'
+      : workflowState === 'failed'
+        ? '<span class="badge red">Failed</span>'
+        : '<span class="badge blue">Running</span>';
+    const leftoverBadge = Array.isArray(projectCloneState.status?.residual_resources) && projectCloneState.status.residual_resources.length
+      ? `<span class="badge yellow">${esc(`${projectCloneState.status.residual_resources.length} Leftover`)}</span>`
+      : '';
     content.innerHTML = `
       <div class="project-clone-shell" role="dialog" aria-modal="true" aria-labelledby="project-clone-title">
-        <div class="session-head">
-          <div class="session-head-brand">
-            <div class="session-brand-icon">C</div>
-            <div>
-              <div class="session-brand" id="project-clone-title">Clone Workflow</div>
-              <div class="session-kicker">Live execution view for ${esc(instance.name || instance.id || 'selected instance')}.</div>
+        <div class="clone-workflow-header">
+          <div class="clone-workflow-header-icon">C</div>
+          <div class="clone-workflow-header-meta">
+            <div class="clone-workflow-header-title" id="project-clone-title">${esc(projectCloneState.status?.new_name || projectCloneState.newName || 'Clone Workflow')}</div>
+            <div class="clone-workflow-header-sub">Dedicated clone workflow view for ${esc(instance.name || instance.id || 'selected instance')}.</div>
+            <div class="clone-workflow-header-badges">
+              ${workflowBadge}
+              <span class="badge blue">${esc(`Source: ${instance.name || instance.id || 'instance'}`)}</span>
+              ${leftoverBadge}
             </div>
           </div>
-          <div class="session-title">Clone Execution</div>
-          <div class="session-sub">Track workflow steps, rollback attempts, and leftover resources without the preflight noise.</div>
+        </div>
+        <div class="clone-workflow-tabs">
+          <div class="clone-workflow-tab active">Workflow</div>
+          <div class="clone-workflow-tab">Rollback</div>
+          <div class="clone-workflow-tab">Source Context</div>
         </div>
         <div class="session-body">
           ${renderProjectCloneWorkflowPanel()}
-          ${projectCloneState.message ? `<div class="${statusTone}" style="padding:10px 12px">${esc(projectCloneState.message)}</div>` : ''}
+          ${projectCloneState.message ? `<div class="${projectCloneMessageClass()}">${esc(projectCloneState.message)}</div>` : ''}
           <div class="session-actions" style="justify-content:flex-end">
             <button class="btn" onclick="closeProjectClonePlanner()">${isProjectCloneActive() || projectCloneState.submitting ? 'Close (clone continues)' : 'Close'}</button>
           </div>
@@ -1388,7 +1422,7 @@ function renderProjectCloneOverlay() {
           </div>
         </div>
 
-        ${projectCloneState.message ? `<div class="${statusTone}" style="padding:10px 12px">${esc(projectCloneState.message)}</div>` : ''}
+        ${projectCloneState.message ? `<div class="${projectCloneMessageClass()}">${esc(projectCloneState.message)}</div>` : ''}
 
         <div class="session-actions" style="justify-content:flex-end">
           <button class="btn" onclick="closeProjectClonePlanner()">${isProjectCloneActive() || projectCloneState.submitting ? 'Close (clone continues)' : 'Close'}</button>
