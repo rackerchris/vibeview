@@ -1,6 +1,7 @@
 'use strict';
 
 let projectSearchTimer = null;
+let projectCloneStatusTimer = null;
 const projectCloneState = {
   open: false,
   source: null,
@@ -12,9 +13,19 @@ const projectCloneState = {
   submitting: false,
   requestId: '',
   activeCloneLabel: '',
+  trackedInstanceId: '',
+  status: null,
   message: '',
   tone: 'info',
 };
+
+function projectCloneStatusState() {
+  return String(projectCloneState.status?.state || '').toLowerCase();
+}
+
+function isProjectCloneActive() {
+  return ['queued', 'running'].includes(projectCloneStatusState());
+}
 
 function projectViewLabel(name = activeProjectView) {
   return ({
@@ -623,7 +634,7 @@ function openProjectClonePlanner(instanceId) {
     onLog?.({ node: '-', message: `Clone source ${instanceId} is not loaded yet. Open the instance detail first and try again.`, color: 'warn' });
     return;
   }
-  if (projectCloneState.submitting) {
+  if (isProjectCloneActive()) {
     onLog?.({
       node: '-',
       message: `Clone already in progress for ${projectCloneState.activeCloneLabel || 'another instance'}. Wait for it to finish before starting another clone.`,
@@ -650,13 +661,170 @@ function openProjectClonePlanner(instanceId) {
 function closeProjectClonePlanner() {
   projectCloneState.open = false;
   projectCloneState.source = null;
-  if (!projectCloneState.submitting) {
+  if (!isProjectCloneActive()) {
     projectCloneState.message = '';
     projectCloneState.tone = 'info';
   }
   const overlay = document.getElementById('project-clone-overlay');
   if (overlay) overlay.classList.remove('open');
   if (activeView === 'projects') renderProjectsWorkspace();
+}
+
+async function loadProjectCloneStatus(instanceId, force = false) {
+  if (!instanceId) return null;
+  const previousState = projectCloneStatusState();
+  try {
+    const qs = force ? '?refresh=1' : '';
+    const resp = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/clone-status${qs}`);
+    const json = await resp.json();
+    projectCloneState.status = json.status || null;
+    projectCloneState.trackedInstanceId = instanceId;
+  } catch (err) {
+    projectCloneState.status = {
+      state: 'failed',
+      source_instance_id: instanceId,
+      step_key: 'status_error',
+      step_label: 'Status Poll Failed',
+      detail: 'Unable to refresh clone status from the server.',
+      error: String(err),
+    };
+    projectCloneState.trackedInstanceId = instanceId;
+  }
+  const nextState = projectCloneStatusState();
+  if (nextState !== previousState && ['completed', 'failed'].includes(nextState)) {
+    if (nextState === 'completed') {
+      const result = projectCloneState.status?.result || {};
+      const warningText = (result.warnings || []).filter(Boolean).join(' ');
+      projectCloneState.tone = warningText ? 'warn' : 'info';
+      projectCloneState.message = `Clone created as ${result.server_name || projectCloneState.status?.new_name || 'new server'} (${result.server_id || 'server id unavailable'}).`
+        + `${result.floating_ip_id ? ` Floating IP ${result.floating_ip_id} was allocated.` : projectCloneState.createFloatingIp ? ' No floating IP was allocated.' : ' Floating IP creation was skipped.'}`
+        + `${warningText ? ` ${warningText}` : ''}`;
+      onLog?.({
+        node: '-',
+        message: `Clone completed for ${projectCloneState.activeCloneLabel || projectCloneState.status?.source_instance_id || instanceId}: ${result.server_name || projectCloneState.status?.new_name || 'new server'} (${result.server_id || 'unknown server id'}).`,
+        color: 'success',
+      });
+      if (selectedProjectId) {
+        loadProjectInventory(selectedProjectId, 'instances', true, '');
+        if (activeProjectView === 'networking') ensureProjectNetworkingFamiliesLoaded(selectedProjectId, true);
+      }
+    } else {
+      projectCloneState.tone = 'error';
+      projectCloneState.message = `Clone failed during ${projectCloneState.status?.step_label || 'the clone workflow'}: ${projectCloneState.status?.error || projectCloneState.status?.detail || 'Unknown error.'}`;
+      onLog?.({
+        node: '-',
+        message: `Clone failed for ${projectCloneState.activeCloneLabel || projectCloneState.status?.source_instance_id || instanceId} during ${projectCloneState.status?.step_label || 'clone workflow'}: ${projectCloneState.status?.error || projectCloneState.status?.detail || 'Unknown error.'}`,
+        color: 'error',
+      });
+    }
+    projectCloneState.activeCloneLabel = '';
+  }
+  if (activeView === 'projects') renderProjectsWorkspace();
+  if (projectCloneState.open) renderProjectCloneOverlay();
+  return projectCloneState.status;
+}
+
+function stopProjectCloneStatusPolling() {
+  if (projectCloneStatusTimer) clearInterval(projectCloneStatusTimer);
+  projectCloneStatusTimer = null;
+}
+
+function startProjectCloneStatusPolling(instanceId) {
+  if (!instanceId) return;
+  projectCloneState.trackedInstanceId = instanceId;
+  stopProjectCloneStatusPolling();
+  loadProjectCloneStatus(instanceId, true);
+  projectCloneStatusTimer = setInterval(async () => {
+    const status = await loadProjectCloneStatus(instanceId, true);
+    if (!status || ['completed', 'failed'].includes(String(status.state || ''))) {
+      stopProjectCloneStatusPolling();
+    }
+  }, 1500);
+}
+
+function renderProjectCloneStatusCard() {
+  const status = projectCloneState.status;
+  if (!status || (!isProjectCloneActive() && !projectCloneState.trackedInstanceId)) return '';
+  const state = String(status.state || (isProjectCloneActive() ? 'running' : 'unknown'));
+  const tone = state === 'failed' ? 'err-block' : state === 'completed' ? 'note' : 'subtle';
+  const sourceLabel = projectCloneState.activeCloneLabel || status.new_name || status.source_instance_id || 'clone';
+  return `
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-title">Clone Activity</div>
+      <div class="card-body">
+        <div class="${tone}" style="padding:10px 12px">
+          <div style="font-weight:700;margin-bottom:4px">${esc(sourceLabel)} · ${esc(status.step_label || (state === 'running' ? 'Clone Running' : 'Clone Status'))}</div>
+          <div>${esc(status.detail || (isProjectCloneActive() ? 'Clone request is running.' : 'No clone detail available.'))}</div>
+          <div style="margin-top:6px;font-size:11px;color:var(--dim)">State: ${esc(state)}</div>
+          ${status.error ? `<div style="margin-top:6px;color:var(--red);font-size:11px">${esc(status.error)}</div>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function projectCloneTimelineEntries() {
+  return Array.isArray(projectCloneState.status?.timeline) ? projectCloneState.status.timeline : [];
+}
+
+function renderProjectCloneWorkflowPanel() {
+  const status = projectCloneState.status;
+  if (!status) return '';
+  const entries = projectCloneTimelineEntries();
+  const cleanupRows = Array.isArray(status.cleanup_actions) ? status.cleanup_actions : [];
+  const residualRows = Array.isArray(status.residual_resources) ? status.residual_resources : [];
+  return `
+    <div class="session-panel">
+      <div class="session-panel-head">
+        <div class="session-panel-title">Clone Workflow</div>
+        <div class="session-panel-sub">${esc(String(status.state || 'unknown'))}</div>
+      </div>
+      <div class="session-panel-body">
+        <div style="display:grid;gap:8px">
+          ${entries.length ? entries.map((entry, idx) => {
+            const entryState = String(entry.state || 'unknown');
+            const tone = entryState === 'failed' ? 'err-block' : entryState === 'completed' ? 'note' : 'subtle';
+            return `<div class="${tone}" style="padding:8px 10px">
+              <div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+                <strong>${esc(`${idx + 1}. ${entry.step_label || entry.step_key || 'Clone Step'}`)}</strong>
+                <span class="hint" style="text-transform:uppercase">${esc(entryState)}</span>
+              </div>
+              <div style="margin-top:4px">${esc(entry.detail || '—')}</div>
+              ${entry.error ? `<div style="margin-top:6px;color:var(--red);font-size:11px">${esc(entry.error)}</div>` : ''}
+            </div>`;
+          }).join('') : '<div class="subtle" style="padding:10px 12px">No clone workflow events have been recorded yet.</div>'}
+        </div>
+        ${cleanupRows.length ? `
+          <div style="margin-top:12px">
+            <div style="font-weight:700;margin-bottom:6px">Rollback Attempts</div>
+            <table class="data-table" style="margin-bottom:0">
+              <thead><tr><th>Resource</th><th>ID</th><th>Outcome</th></tr></thead>
+              <tbody>
+                ${cleanupRows.map((item) => `<tr>
+                  <td>${esc(item.resource_type || 'resource')}</td>
+                  <td class="mono">${esc(item.resource_id || '—')}</td>
+                  <td>${esc(item.state || 'unknown')}${item.error ? `: ${esc(item.error)}` : ''}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>` : ''}
+        ${residualRows.length ? `
+          <div style="margin-top:12px">
+            <div style="font-weight:700;margin-bottom:6px">Leftover Resources</div>
+            <table class="data-table" style="margin-bottom:0">
+              <thead><tr><th>Resource</th><th>ID</th><th>Action</th></tr></thead>
+              <tbody>
+                ${residualRows.map((item) => `<tr>
+                  <td>${esc(item.resource_type || 'resource')}</td>
+                  <td class="mono">${esc(item.resource_id || '—')}</td>
+                  <td><button class="btn" onclick="cleanupProjectCloneResource('${escAttr(status.source_instance_id || projectCloneState.trackedInstanceId || '')}','${escAttr(item.resource_type || '')}','${escAttr(item.resource_id || '')}')">Delete Resource</button></td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>` : ''}
+      </div>
+    </div>
+  `;
 }
 
 function updateProjectCloneField(field, value) {
@@ -687,7 +855,7 @@ function restoreProjectCloneFocusState(container, state) {
 
 async function submitProjectClonePlanner() {
   const instance = projectCloneState.source;
-  if (!instance || projectCloneState.submitting) return;
+  if (!instance || projectCloneState.submitting || isProjectCloneActive()) return;
   const newName = String(projectCloneState.newName || '').trim();
   if (!newName) {
     projectCloneState.message = 'Provide a name for the new server.';
@@ -706,6 +874,15 @@ async function submitProjectClonePlanner() {
   projectCloneState.submitting = true;
   projectCloneState.requestId = requestId;
   projectCloneState.activeCloneLabel = instance.name || instance.id || 'instance';
+  projectCloneState.trackedInstanceId = instance.id;
+  projectCloneState.status = {
+    state: 'running',
+    source_instance_id: instance.id,
+    step_key: 'queued',
+    step_label: 'Queued',
+    detail: 'Clone request accepted and waiting for backend progress.',
+    error: null,
+  };
   projectCloneState.message = `Submitting clone for ${instance.name || instance.id || 'instance'}${cloneDataVolumes ? ` with ${dataVolumeCount} cloned data volume(s)` : ''}. This can take several minutes. You can close this panel while the clone continues.`;
   projectCloneState.tone = 'info';
   onLog?.({
@@ -713,6 +890,7 @@ async function submitProjectClonePlanner() {
     message: `Clone requested for ${instance.name || instance.id}${cloneDataVolumes ? ` with ${dataVolumeCount} cloned data volume(s)` : ''}.`,
     color: 'important',
   });
+  startProjectCloneStatusPolling(instance.id);
   renderProjectCloneOverlay();
   try {
     const resp = await fetch(`/api/instances/${encodeURIComponent(instance.id)}/clone`, {
@@ -727,40 +905,71 @@ async function submitProjectClonePlanner() {
       }),
     });
     const json = await resp.json();
+    await loadProjectCloneStatus(instance.id, true);
     if (json.api_issue) recordApiIssue(json.api_issue);
     else recordApiSuccess('OpenStack');
     if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
     const result = json.result || {};
-    const warningText = (result.warnings || []).filter(Boolean).join(' ');
     if (projectCloneState.requestId === requestId && projectCloneState.open && projectCloneState.source?.id === instance.id) {
-      projectCloneState.tone = warningText ? 'warn' : 'info';
-      projectCloneState.message = `Clone created as ${result.server_name || newName} (${result.server_id || 'server id unavailable'}).`
-        + `${result.floating_ip_id ? ` Floating IP ${result.floating_ip_id} was allocated.` : createFloatingIp ? ' No floating IP was allocated.' : ' Floating IP creation was skipped.'}`
-        + `${warningText ? ` ${warningText}` : ''}`;
+      projectCloneState.tone = 'info';
+      projectCloneState.message = `Clone launched for ${instance.name || instance.id || 'instance'}. Follow the status panel for the current workflow step and any failure detail.`;
     }
     onLog?.({
       node: '-',
-      message: `Clone created for ${instance.name || instance.id}: ${result.server_name || newName} (${result.server_id || 'unknown server id'}).`,
-      color: 'success',
+      message: `Clone launched for ${instance.name || instance.id}. Waiting for backend progress.`,
+      color: 'important',
     });
-    if (selectedProjectId) {
-      loadProjectInventory(selectedProjectId, 'instances', true, '');
-      if (activeProjectView === 'networking') ensureProjectNetworkingFamiliesLoaded(selectedProjectId, true);
-    }
   } catch (err) {
     if (projectCloneState.requestId === requestId && projectCloneState.open && projectCloneState.source?.id === instance.id) {
       projectCloneState.tone = 'error';
       projectCloneState.message = `Clone failed: ${err}`;
     }
+    await loadProjectCloneStatus(instance.id, true);
     onLog?.({ node: '-', message: `Clone failed for ${instance.name || instance.id}: ${err}`, color: 'error' });
   } finally {
     if (projectCloneState.requestId === requestId) {
       projectCloneState.submitting = false;
       projectCloneState.requestId = '';
+    }
+    if (projectCloneState.status && ['completed', 'failed'].includes(String(projectCloneState.status.state || ''))) {
+      stopProjectCloneStatusPolling();
       projectCloneState.activeCloneLabel = '';
     }
     if (!projectCloneState.open) renderProjectsWorkspace();
     renderProjectCloneOverlay();
+  }
+}
+
+async function cleanupProjectCloneResource(instanceId, resourceType, resourceId) {
+  if (!instanceId || !resourceType || !resourceId) return;
+  onLog?.({
+    node: '-',
+    message: `Deleting leftover clone ${resourceType} ${resourceId}.`,
+    color: 'warn',
+  });
+  try {
+    const resp = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/clone-cleanup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_type: resourceType, resource_id: resourceId }),
+    });
+    const json = await resp.json();
+    if (json.api_issue) recordApiIssue(json.api_issue);
+    else recordApiSuccess('OpenStack');
+    if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
+    await loadProjectCloneStatus(instanceId, true);
+    onLog?.({
+      node: '-',
+      message: `Deleted leftover clone ${resourceType} ${resourceId}.`,
+      color: 'success',
+    });
+  } catch (err) {
+    onLog?.({
+      node: '-',
+      message: `Failed to delete leftover clone ${resourceType} ${resourceId}: ${err}`,
+      color: 'error',
+    });
+    await loadProjectCloneStatus(instanceId, true);
   }
 }
 
@@ -936,6 +1145,8 @@ function renderProjectCloneOverlay() {
           </div>
         </div>
 
+        ${renderProjectCloneWorkflowPanel()}
+
         <div class="session-panel">
           <div class="session-panel-head">
             <div class="session-panel-title">Volume Plan</div>
@@ -959,8 +1170,8 @@ function renderProjectCloneOverlay() {
         ${projectCloneState.message ? `<div class="${statusTone}" style="padding:10px 12px">${esc(projectCloneState.message)}</div>` : ''}
 
         <div class="session-actions" style="justify-content:flex-end">
-          <button class="btn" onclick="closeProjectClonePlanner()">${projectCloneState.submitting ? 'Close (clone continues)' : 'Close'}</button>
-          <button class="btn primary" onclick="submitProjectClonePlanner()" ${projectCloneState.submitting ? 'disabled' : ''}>${projectCloneState.submitting ? 'Launching Clone…' : 'Launch Clone'}</button>
+          <button class="btn" onclick="closeProjectClonePlanner()">${isProjectCloneActive() || projectCloneState.submitting ? 'Close (clone continues)' : 'Close'}</button>
+          <button class="btn primary" onclick="submitProjectClonePlanner()" ${(projectCloneState.submitting || isProjectCloneActive()) ? 'disabled' : ''}>${projectCloneState.submitting ? 'Launching Clone…' : isProjectCloneActive() ? 'Clone Busy…' : 'Launch Clone'}</button>
         </div>
       </div>
     </div>
@@ -1060,7 +1271,7 @@ function isAmphoraInstance(item) {
 }
 
 function renderProjectInstanceRows(items, cloneable, emptyMessage) {
-  const cloneBusy = projectCloneState.submitting;
+  const cloneBusy = isProjectCloneActive() || projectCloneState.submitting;
   return items.map((item) => `
     <tr class="${projectDetailState.kind === 'instances' && projectDetailState.item?.id === item.id ? 'selected' : ''}" style="cursor:pointer" onclick="selectProjectDetailById('instances','${escAttr(item.id)}')">
       <td><div style="font-weight:600">${esc(item.name || item.id)}</div><div class="uuid-short" title="${esc(item.id)}">${esc((item.id || '').slice(0, 12))}</div></td>
@@ -1138,6 +1349,7 @@ function renderProjectInstances(inv) {
   const amphoraInstances = items.filter((item) => isAmphoraInstance(item));
   return `
     ${renderProjectToolbar('Instances', items.length, 'Filter instances…')}
+    ${renderProjectCloneStatusCard()}
     <div class="card" style="margin-bottom:10px">
       <div class="card-title">Project Instances</div>
       <div class="card-body" style="padding:0">
@@ -1579,7 +1791,7 @@ function renderProjectDetailDrawer() {
       <div class="net-detail-head">
         <strong style="font-size:13px">${esc(projectDetailState.kind === 'securitygroups' ? 'Security Group' : projectDetailState.kind === 'floatingips' ? 'Floating IP' : projectDetailState.kind === 'loadbalancers' ? 'Load Balancer' : projectDetailState.kind === 'networks' ? 'Network' : projectDetailState.kind === 'routers' ? 'Router' : projectDetailState.kind === 'ports' ? 'Port' : projectDetailState.kind === 'volumes' ? 'Volume' : 'Instance')} Detail</strong>
         <div style="display:flex;gap:6px;align-items:center">
-          ${projectDetailState.kind === 'instances' && !isAmphoraInstance(detail || item) ? `<button class="btn" style="padding:1px 7px;font-size:11px" onclick="cloneProjectInstance('${escAttr(detail.id || item.id || '')}')" ${projectCloneState.submitting ? `disabled title="Clone already running for ${escAttr(projectCloneState.activeCloneLabel || 'another instance')}"` : ''}>${projectCloneState.submitting ? 'Clone Busy…' : 'Clone'}</button>` : ''}
+          ${projectDetailState.kind === 'instances' && !isAmphoraInstance(detail || item) ? `<button class="btn" style="padding:1px 7px;font-size:11px" onclick="cloneProjectInstance('${escAttr(detail.id || item.id || '')}')" ${(isProjectCloneActive() || projectCloneState.submitting) ? `disabled title="Clone already running for ${escAttr(projectCloneState.activeCloneLabel || 'another instance')}"` : ''}>${(isProjectCloneActive() || projectCloneState.submitting) ? 'Clone Busy…' : 'Clone'}</button>` : ''}
           <button class="btn" style="padding:1px 7px;font-size:11px" onclick="projectDetailState.kind='';projectDetailState.item=null;projectDetailState.data=null;projectDetailState.error=null;renderProjectsWorkspace()">✕</button>
         </div>
       </div>

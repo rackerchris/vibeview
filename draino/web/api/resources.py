@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import time
 from collections.abc import Callable
 from functools import partial
 
@@ -15,6 +17,7 @@ from ...operations import k8s_ops, openstack_ops
 from ..assistant_service import answer_assistant_query, assistant_provider_status, stream_assistant_query, validate_assistant_provider
 from .api_issues import build_api_issue
 from ..resource_helpers import (
+    CloneWorkflowError,
     clone_instance,
     get_floating_ips,
     get_port_detail,
@@ -45,6 +48,8 @@ router = APIRouter()
 _LOGGER = logging.getLogger("draino.web")
 _RESOURCE_DETAIL_TIMEOUT_SECONDS = float(os.getenv("DRAINO_RESOURCE_DETAIL_TIMEOUT_SECONDS", "10"))
 _ASSISTANT_QUERY_TIMEOUT_SECONDS = float(os.getenv("DRAINO_ASSISTANT_QUERY_TIMEOUT_SECONDS", "20"))
+_clone_status_lock = threading.Lock()
+_clone_status_by_instance: dict[str, dict] = {}
 
 _get_session_record_getter: Callable[[], Callable[[Request], object]] | None = None
 
@@ -58,6 +63,69 @@ def _require_session_record() -> Callable[[Request], object]:
     if _get_session_record_getter is None:
         raise RuntimeError("resource routes are not configured")
     return _get_session_record_getter()
+
+
+def _set_clone_status(instance_id: str, payload: dict) -> None:
+    with _clone_status_lock:
+        _clone_status_by_instance[instance_id] = {
+            **payload,
+            "updated_at": time.time(),
+        }
+
+
+def _clone_status(instance_id: str) -> dict:
+    with _clone_status_lock:
+        return dict(_clone_status_by_instance.get(instance_id) or {})
+
+
+def _clone_status_append_timeline(instance_id: str, entry: dict) -> dict:
+    with _clone_status_lock:
+        current = dict(_clone_status_by_instance.get(instance_id) or {})
+        timeline = list(current.get("timeline") or [])
+        timeline.append({
+            **entry,
+            "updated_at": time.time(),
+        })
+        current["timeline"] = timeline
+        current["updated_at"] = time.time()
+        _clone_status_by_instance[instance_id] = current
+        return dict(current)
+
+
+def _clone_progress_status(
+    instance_id: str,
+    *,
+    new_name: str,
+    step_key: str,
+    step_label: str,
+    detail: str,
+    state: str = "running",
+    error: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    current = _clone_status(instance_id)
+    payload = {
+        **current,
+        "state": state,
+        "source_instance_id": instance_id,
+        "new_name": new_name,
+        "step_key": step_key,
+        "step_label": step_label,
+        "detail": detail,
+        "started_at": current.get("started_at") or time.time(),
+        "error": error,
+    }
+    if extra:
+        payload.update(extra)
+    _set_clone_status(instance_id, payload)
+    _clone_status_append_timeline(instance_id, {
+        "step_key": step_key,
+        "step_label": step_label,
+        "detail": detail,
+        "state": state,
+        "error": error,
+        **(extra or {}),
+    })
 
 
 async def _run_with_timeout(func, *args):
@@ -475,30 +543,174 @@ async def api_instance_clone(instance_id: str, request: Request):
         power_on,
         keep_metadata,
     )
-    loop = asyncio.get_running_loop()
-    try:
-        data = await loop.run_in_executor(
-            None,
-            partial(
-                clone_instance,
+    existing = _clone_status(instance_id)
+    if existing and str(existing.get("state") or "") == "running":
+        return {
+            "result": None,
+            "error": "A clone is already running for this source instance.",
+            "api_issue": None,
+        }
+    _set_clone_status(instance_id, {
+        "state": "running",
+        "source_instance_id": instance_id,
+        "new_name": new_name,
+        "step_key": "queued",
+        "step_label": "Queued",
+        "detail": "Clone request accepted and waiting to start.",
+        "started_at": time.time(),
+        "result": None,
+        "error": None,
+        "timeline": [{
+            "step_key": "queued",
+            "step_label": "Queued",
+            "detail": "Clone request accepted and waiting to start.",
+            "state": "running",
+            "updated_at": time.time(),
+        }],
+        "created_resources": {},
+        "cleanup_actions": [],
+        "residual_resources": [],
+    })
+
+    def progress_cb(step_key: str, label: str, detail: str, state: str = "running", extra: dict | None = None) -> None:
+        _clone_progress_status(
+            instance_id,
+            new_name=new_name,
+            step_key=step_key,
+            step_label=label,
+            detail=detail,
+            state=state,
+            error=None,
+            extra=extra,
+        )
+
+    def _run_clone() -> None:
+        try:
+            data = clone_instance(
                 instance_id,
                 new_name=new_name,
                 clone_data_volumes=clone_data_volumes,
                 create_floating_ip=create_floating_ip,
                 power_on=power_on,
                 keep_metadata=keep_metadata,
+                progress_cb=progress_cb,
                 auth=session.server.openstack_auth,
-            ),
-        )
-        _LOGGER.info("clone api success instance_id=%s server_id=%s", instance_id, (data or {}).get("server_id"))
-        return {"result": data, "error": None, "api_issue": None}
-    except Exception as exc:
-        _LOGGER.exception("clone api failed instance_id=%s", instance_id)
+            )
+            _clone_progress_status(
+                instance_id,
+                new_name=new_name,
+                step_key="completed",
+                step_label="Clone Complete",
+                detail=f"Clone created as {(data or {}).get('server_name') or new_name}.",
+                state="completed",
+                error=None,
+                extra={"result": data},
+            )
+            _LOGGER.info("clone api success instance_id=%s server_id=%s", instance_id, (data or {}).get("server_id"))
+        except Exception as exc:
+            previous = _clone_status(instance_id)
+            failure_detail = previous.get("detail") or "Clone failed."
+            failure_extra = {"result": None}
+            if isinstance(exc, CloneWorkflowError):
+                failure_detail = exc.failed_detail or failure_detail
+                failure_extra.update({
+                    "created_resources": exc.created_resources,
+                    "cleanup_actions": exc.cleanup_actions,
+                    "residual_resources": exc.residual_resources,
+                })
+            _clone_progress_status(
+                instance_id,
+                new_name=new_name,
+                step_key=(getattr(exc, "failed_step_key", "") or previous.get("step_key") or "failed"),
+                step_label=(getattr(exc, "failed_step_label", "") or previous.get("step_label") or "Clone Failed"),
+                detail=failure_detail,
+                state="failed",
+                error=str(exc),
+                extra=failure_extra,
+            )
+            _LOGGER.exception("clone api failed instance_id=%s", instance_id)
+
+    threading.Thread(target=_run_clone, daemon=True).start()
+    return {
+        "result": {
+            "accepted": True,
+            "source_instance_id": instance_id,
+            "new_name": new_name,
+            "state": "running",
+            "step_key": "queued",
+            "step_label": "Queued",
+        },
+        "error": None,
+        "api_issue": None,
+    }
+
+
+@router.get("/api/instances/{instance_id}/clone-status")
+async def api_instance_clone_status(instance_id: str, request: Request):
+    _require_session_record()(request)
+    status = _clone_status(instance_id)
+    return {"status": status or None, "error": None, "api_issue": None}
+
+
+@router.post("/api/instances/{instance_id}/clone-cleanup")
+async def api_instance_clone_cleanup(instance_id: str, request: Request):
+    session = _require_session_record()(request)
+    payload = await request.json()
+    resource_type = str(payload.get("resource_type") or "").strip()
+    resource_id = str(payload.get("resource_id") or "").strip()
+    if not resource_type or not resource_id:
+        return {"result": None, "error": "resource_type and resource_id are required.", "api_issue": None}
+    conn = openstack_ops._conn(auth=session.server.openstack_auth)
+    volume_proxy = getattr(conn, "block_storage", None) or getattr(conn, "volume", None)
+    try:
+        if resource_type == "port":
+            conn.network.delete_port(resource_id, ignore_missing=True)
+        elif resource_type == "volume":
+            if volume_proxy is None:
+                raise RuntimeError("Block storage is not available from the current SDK connection")
+            volume_proxy.delete_volume(resource_id, ignore_missing=True)
+        elif resource_type == "floating_ip":
+            conn.network.delete_ip(resource_id, ignore_missing=True)
+        elif resource_type == "server":
+            conn.compute.delete_server(resource_id, ignore_missing=True)
+        elif resource_type == "snapshot_image":
+            conn.image.delete_image(resource_id, ignore_missing=True)
+        else:
+            raise ValueError(f"Unsupported clone cleanup resource type: {resource_type}")
+        status = _clone_status(instance_id)
+        residual_resources = [
+            item for item in list(status.get("residual_resources") or [])
+            if not (str(item.get("resource_type") or "") == resource_type and str(item.get("resource_id") or "") == resource_id)
+        ]
+        cleanup_actions = list(status.get("cleanup_actions") or []) + [{
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "state": "deleted_by_operator",
+        }]
+        _set_clone_status(instance_id, {
+            **status,
+            "cleanup_actions": cleanup_actions,
+            "residual_resources": residual_resources,
+        })
+        _clone_status_append_timeline(instance_id, {
+            "step_key": "cleanup_manual",
+            "step_label": "Manual Cleanup",
+            "detail": f"Operator deleted leftover {resource_type} {resource_id}.",
+            "state": "completed",
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+        })
         return {
-            "result": None,
-            "error": str(exc),
-            "api_issue": build_api_issue("OpenStack", f"POST /api/instances/{instance_id}/clone", exc),
+            "result": {
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "residual_resources": residual_resources,
+            },
+            "error": None,
+            "api_issue": None,
         }
+    except Exception as exc:
+        return {"result": None, "error": str(exc), "api_issue": build_api_issue("OpenStack", f"POST clone cleanup {resource_type} {resource_id}", exc)}
 
 
 @router.get("/api/volume-snapshots")

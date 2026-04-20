@@ -13,6 +13,27 @@ _ADMIN_PORTS = {22, 3389, 5900, 6443}
 _CLONE_LOG = logging.getLogger("draino.clone")
 
 
+class CloneWorkflowError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        failed_step_key: str = "",
+        failed_step_label: str = "",
+        failed_detail: str = "",
+        created_resources: dict | None = None,
+        cleanup_actions: list[dict] | None = None,
+        residual_resources: list[dict] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failed_step_key = failed_step_key
+        self.failed_step_label = failed_step_label
+        self.failed_detail = failed_detail
+        self.created_resources = dict(created_resources or {})
+        self.cleanup_actions = list(cleanup_actions or [])
+        self.residual_resources = list(residual_resources or [])
+
+
 def coerce_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -2928,8 +2949,21 @@ def clone_instance(
     create_floating_ip: bool = True,
     power_on: bool = True,
     keep_metadata: bool = True,
+    progress_cb=None,
     auth: openstack_ops.OpenStackAuth | None = None,
 ) -> dict:
+    current_step_key = "queued"
+    current_step_label = "Queued"
+    current_step_detail = "Clone request accepted and waiting to start."
+
+    def progress(step_key: str, label: str, detail: str, state: str = "running", extra: dict | None = None) -> None:
+        nonlocal current_step_key, current_step_label, current_step_detail
+        current_step_key = step_key
+        current_step_label = label
+        current_step_detail = detail
+        if callable(progress_cb):
+            progress_cb(step_key, label, detail, state, extra)
+
     _CLONE_LOG.info(
         "clone requested instance_id=%s new_name=%s clone_data_volumes=%s create_floating_ip=%s power_on=%s keep_metadata=%s",
         instance_id,
@@ -2941,6 +2975,7 @@ def clone_instance(
     )
     conn = openstack_ops._conn(auth=auth)
     volume_proxy = getattr(conn, "block_storage", None) or getattr(conn, "volume", None)
+    progress("fetch_source", "Fetch Source Instance", "Loading source instance details.")
     _CLONE_LOG.debug("clone step=fetch_source instance_id=%s", instance_id)
     source = conn.compute.get_server(instance_id)
     if source is None:
@@ -2964,11 +2999,13 @@ def clone_instance(
     if not flavor_id:
         raise RuntimeError("Unable to resolve source flavor id for clone")
     _CLONE_LOG.debug("clone step=source_resolved instance_id=%s flavor_id=%s", instance_id, flavor_id)
+    progress("resolve_source", "Resolve Source Topology", f"Resolved flavor {flavor_id} and source metadata.")
 
     source_ports = list(conn.network.ports(device_id=instance_id))
     if not source_ports:
         raise RuntimeError("Source instance has no Neutron ports to clone")
     _CLONE_LOG.debug("clone step=source_ports_resolved instance_id=%s port_count=%s", instance_id, len(source_ports))
+    progress("resolve_ports", "Resolve Source Ports", f"Found {len(source_ports)} Neutron port(s) to clone.")
 
     created_ports: list[str] = []
     created_volumes: list[str] = []
@@ -2977,11 +3014,26 @@ def clone_instance(
     snapshot_image_id = ""
     warnings: list[str] = []
 
+    def created_resources_snapshot() -> dict:
+        return {
+            "ports": [{"id": item} for item in created_ports if item],
+            "volumes": [{"id": item} for item in created_volumes if item],
+            "floating_ips": [{"id": created_floating_ip_id}] if created_floating_ip_id else [],
+            "servers": [{"id": created_server_id}] if created_server_id else [],
+            "snapshot_images": [{"id": snapshot_image_id}] if snapshot_image_id else [],
+        }
+
     try:
+        progress("create_ports", "Clone Neutron Ports", "Creating fresh Neutron ports for the clone.", "running", {
+            "created_resources": created_resources_snapshot(),
+        })
         _CLONE_LOG.debug("clone step=create_ports start instance_id=%s", instance_id)
         cloned_ports = [_create_port_clone(conn, port, requested_name, project_id) for port in source_ports]
         created_ports = [item["id"] for item in cloned_ports if item.get("id")]
         _CLONE_LOG.debug("clone step=create_ports complete instance_id=%s created_ports=%s", instance_id, created_ports)
+        progress("create_ports", "Clone Neutron Ports", f"Created {len(created_ports)} port(s) for the clone.", "running", {
+            "created_resources": created_resources_snapshot(),
+        })
 
         source_floating_network_id = ""
         for port in source_ports:
@@ -2998,6 +3050,9 @@ def clone_instance(
 
         volume_ids = _server_volume_ids(source)
         _CLONE_LOG.debug("clone step=source_volumes_resolved instance_id=%s volume_ids=%s", instance_id, volume_ids)
+        progress("resolve_volumes", "Resolve Attached Volumes", f"Found {len(volume_ids)} attached volume(s) on the source instance.", "running", {
+            "created_resources": created_resources_snapshot(),
+        })
         cloned_volume_records: list[dict] = []
         for volume_id in volume_ids:
             if volume_proxy is None:
@@ -3013,6 +3068,11 @@ def clone_instance(
                 continue
             source_volume_data = _obj_dict(volume)
             clone_name = f"{requested_name}-{getattr(volume, 'name', None) or source_volume_data.get('name') or volume_id}"
+            progress("clone_volume", "Clone Cinder Volumes", f"Cloning volume {volume_id} as {clone_name}.", "running", {
+                "resource_type": "volume",
+                "source_id": volume_id,
+                "created_resources": created_resources_snapshot(),
+            })
             _CLONE_LOG.debug("clone step=create_volume start instance_id=%s source_volume_id=%s clone_name=%s", instance_id, volume_id, clone_name)
             cloned = volume_proxy.create_volume(
                 name=clone_name,
@@ -3038,6 +3098,12 @@ def clone_instance(
                 "name": getattr(cloned_ready, "name", None) or _obj_dict(cloned_ready).get("name") or clone_name,
             })
             _CLONE_LOG.debug("clone step=create_volume complete instance_id=%s source_volume_id=%s cloned_volume_id=%s", instance_id, volume_id, cloned_id)
+            progress("clone_volume", "Clone Cinder Volumes", f"Cloned volume {volume_id} to {cloned_id}.", "running", {
+                "resource_type": "volume",
+                "source_id": volume_id,
+                "resource_id": cloned_id,
+                "created_resources": created_resources_snapshot(),
+            })
 
         block_device_mapping_v2: list[dict] = []
         image_ref = ""
@@ -3063,6 +3129,9 @@ def clone_instance(
                     "device_name": item.get("device_name") or None,
                 })
         else:
+            progress("create_snapshot", "Create Snapshot Image", "Creating a snapshot image for the source instance.", "running", {
+                "created_resources": created_resources_snapshot(),
+            })
             _CLONE_LOG.debug("clone step=create_snapshot start instance_id=%s", instance_id)
             snapshot_image_id = _compute_create_server_image(conn, instance_id, f"{requested_name}-snapshot")
             image = _wait_for_status(
@@ -3074,6 +3143,9 @@ def clone_instance(
             )
             image_ref = getattr(image, "id", None) or _obj_dict(image).get("id") or snapshot_image_id
             _CLONE_LOG.debug("clone step=create_snapshot complete instance_id=%s snapshot_image_id=%s", instance_id, image_ref)
+            progress("create_snapshot", "Create Snapshot Image", f"Snapshot image {image_ref} is ready.", "running", {
+                "created_resources": created_resources_snapshot(),
+            })
             for item in sorted(cloned_volume_records, key=lambda row: _volume_device_rank(row.get("device_name", ""))):
                 block_device_mapping_v2.append({
                     "boot_index": "-1",
@@ -3102,13 +3174,22 @@ def clone_instance(
         if key_name:
             server_payload["server"]["key_name"] = key_name
 
+        progress("create_server", "Create Nova Server", f"Creating cloned server {requested_name}.", "running", {
+            "created_resources": created_resources_snapshot(),
+        })
         _CLONE_LOG.debug("clone step=create_server start instance_id=%s new_name=%s", instance_id, requested_name)
         created_server = _compute_create_server(conn, server_payload)
         created_server_id = str(created_server.get("id") or "")
         if not created_server_id:
             raise RuntimeError("Nova did not return a cloned server id")
         _CLONE_LOG.debug("clone step=create_server complete instance_id=%s server_id=%s", instance_id, created_server_id)
+        progress("create_server", "Create Nova Server", f"Nova created server record {created_server_id}.", "running", {
+            "created_resources": created_resources_snapshot(),
+        })
 
+        progress("wait_server", "Wait For Server Build", f"Waiting for cloned server {created_server_id} to become ACTIVE or SHUTOFF.", "running", {
+            "created_resources": created_resources_snapshot(),
+        })
         _CLONE_LOG.debug("clone step=wait_server start instance_id=%s server_id=%s", instance_id, created_server_id)
         server_ready = _wait_for_status(
             lambda: conn.compute.get_server(created_server_id),
@@ -3123,9 +3204,15 @@ def clone_instance(
             created_server_id,
             getattr(server_ready, "status", None) or _obj_dict(server_ready).get("status"),
         )
+        progress("wait_server", "Wait For Server Build", f"Clone server {created_server_id} reached status {getattr(server_ready, 'status', None) or _obj_dict(server_ready).get('status')}.", "running", {
+            "created_resources": created_resources_snapshot(),
+        })
 
         if create_floating_ip:
             if source_floating_network_id:
+                progress("create_floating_ip", "Allocate Floating IP", "Allocating a new floating IP for the clone.", "running", {
+                    "created_resources": created_resources_snapshot(),
+                })
                 _CLONE_LOG.debug(
                     "clone step=create_floating_ip start instance_id=%s network_id=%s port_id=%s",
                     instance_id,
@@ -3139,11 +3226,20 @@ def clone_instance(
                 )
                 created_floating_ip_id = getattr(created_fip, "id", None) or _obj_dict(created_fip).get("id") or ""
                 _CLONE_LOG.debug("clone step=create_floating_ip complete instance_id=%s floating_ip_id=%s", instance_id, created_floating_ip_id)
+                progress("create_floating_ip", "Allocate Floating IP", f"Allocated floating IP {created_floating_ip_id}.", "running", {
+                    "created_resources": created_resources_snapshot(),
+                })
             else:
                 warnings.append("No source floating IP network could be inferred, so no new floating IP was created.")
                 _CLONE_LOG.debug("clone step=create_floating_ip skipped instance_id=%s reason=no_source_floating_network", instance_id)
+                progress("create_floating_ip", "Allocate Floating IP", "Skipped floating IP allocation because no source floating network could be inferred.", "running", {
+                    "created_resources": created_resources_snapshot(),
+                })
 
         if not power_on and str(getattr(server_ready, "status", None) or _obj_dict(server_ready).get("status") or "").upper() != "SHUTOFF":
+            progress("power_off", "Power Off Clone", f"Stopping cloned server {created_server_id} after build.", "running", {
+                "created_resources": created_resources_snapshot(),
+            })
             _CLONE_LOG.debug("clone step=power_off start instance_id=%s server_id=%s", instance_id, created_server_id)
             conn.compute.stop_server(created_server_id)
             _wait_for_status(
@@ -3154,6 +3250,9 @@ def clone_instance(
                 timeout=600,
             )
             _CLONE_LOG.debug("clone step=power_off complete instance_id=%s server_id=%s", instance_id, created_server_id)
+            progress("power_off", "Power Off Clone", f"Cloned server {created_server_id} is now SHUTOFF.", "running", {
+                "created_resources": created_resources_snapshot(),
+            })
 
         _CLONE_LOG.info(
             "clone completed instance_id=%s server_id=%s cloned_ports=%s cloned_volumes=%s floating_ip_id=%s warnings=%s",
@@ -3164,6 +3263,9 @@ def clone_instance(
             created_floating_ip_id or "",
             warnings,
         )
+        progress("completed", "Clone Complete", f"Clone created successfully as {requested_name} ({created_server_id}).", "completed", {
+            "created_resources": created_resources_snapshot(),
+        })
         return {
             "source_instance_id": instance_id,
             "server_id": created_server_id,
@@ -3178,7 +3280,7 @@ def clone_instance(
             "power_on": bool(power_on),
             "warnings": warnings,
         }
-    except Exception:
+    except Exception as exc:
         _CLONE_LOG.exception(
             "clone failed instance_id=%s requested_name=%s created_server_id=%s created_ports=%s created_volumes=%s",
             instance_id,
@@ -3187,33 +3289,48 @@ def clone_instance(
             created_ports,
             created_volumes,
         )
-        if created_floating_ip_id:
+        cleanup_actions: list[dict] = []
+        residual_resources: list[dict] = []
+        progress("cleanup", "Rollback Clone Resources", "Clone failed. Attempting to delete any resources created before the failure.", "running", {
+            "created_resources": created_resources_snapshot(),
+        })
+
+        def cleanup_one(resource_type: str, resource_id: str, deleter) -> None:
+            if not resource_id:
+                return
             try:
-                conn.network.delete_ip(created_floating_ip_id, ignore_missing=True)
-            except Exception:
-                pass
-        if created_server_id:
-            try:
-                conn.compute.delete_server(created_server_id, ignore_missing=True)
-            except Exception:
-                pass
+                deleter(resource_id)
+                cleanup_actions.append({"resource_type": resource_type, "resource_id": resource_id, "state": "deleted"})
+            except Exception as cleanup_exc:
+                cleanup_actions.append({
+                    "resource_type": resource_type,
+                    "resource_id": resource_id,
+                    "state": "delete_failed",
+                    "error": str(cleanup_exc),
+                })
+                residual_resources.append({"resource_type": resource_type, "resource_id": resource_id})
+
+        cleanup_one("floating_ip", created_floating_ip_id, lambda resource_id: conn.network.delete_ip(resource_id, ignore_missing=True))
+        cleanup_one("server", created_server_id, lambda resource_id: conn.compute.delete_server(resource_id, ignore_missing=True))
         for volume_id in reversed(created_volumes):
-            try:
-                if volume_proxy is not None:
-                    volume_proxy.delete_volume(volume_id, ignore_missing=True)
-            except Exception:
-                pass
-        if snapshot_image_id:
-            try:
-                conn.image.delete_image(snapshot_image_id, ignore_missing=True)
-            except Exception:
-                pass
+            cleanup_one("volume", volume_id, lambda resource_id, volume_proxy=volume_proxy: volume_proxy.delete_volume(resource_id, ignore_missing=True) if volume_proxy is not None else None)
+        cleanup_one("snapshot_image", snapshot_image_id, lambda resource_id: conn.image.delete_image(resource_id, ignore_missing=True))
         for port_id in reversed(created_ports):
-            try:
-                conn.network.delete_port(port_id, ignore_missing=True)
-            except Exception:
-                pass
-        raise
+            cleanup_one("port", port_id, lambda resource_id: conn.network.delete_port(resource_id, ignore_missing=True))
+        progress("cleanup", "Rollback Clone Resources", f"Rollback attempted for {len(cleanup_actions)} resource(s); {len(residual_resources)} resource(s) still need attention.", "failed", {
+            "created_resources": created_resources_snapshot(),
+            "cleanup_actions": cleanup_actions,
+            "residual_resources": residual_resources,
+        })
+        raise CloneWorkflowError(
+            str(exc),
+            failed_step_key=current_step_key,
+            failed_step_label=current_step_label,
+            failed_detail=current_step_detail,
+            created_resources=created_resources_snapshot(),
+            cleanup_actions=cleanup_actions,
+            residual_resources=residual_resources,
+        ) from exc
 
 
 def get_swift_containers(auth: openstack_ops.OpenStackAuth | None) -> list[dict]:
