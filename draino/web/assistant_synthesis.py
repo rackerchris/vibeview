@@ -178,6 +178,21 @@ def answer_platform_knowledge(query: str, provider: dict[str, Any]) -> dict[str,
     )
 
 
+def answer_platform_knowledge_with_context(query: str, provider: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    system_prompt = (
+        "You are an OpenStack assistant. "
+        "Answer as general OpenStack knowledge, but use the provided context as grounded guidance. "
+        "If the context describes an OpenStack Placement or Nova trait, explain what the trait is for, how it affects scheduling, and note when the explanation is inferred from the naming convention. "
+        "Return JSON with keys: answer, confidence. "
+        "Format answer for readability: start with a short summary paragraph, then use short bullet points when helpful. "
+        "Do not use markdown headers."
+    )
+    return _normalize_provider_result(
+        _provider_chat(provider, system_prompt, {"query": query, "context": context}),
+        0.55,
+    )
+
+
 def stream_platform_knowledge(query: str, provider: dict[str, Any]):
     system_prompt = (
         "You are an OpenStack assistant. "
@@ -189,6 +204,18 @@ def stream_platform_knowledge(query: str, provider: dict[str, Any]):
         "Do not use markdown headers."
     )
     yield from _provider_stream_text(provider, system_prompt, {"query": query})
+
+
+def stream_platform_knowledge_with_context(query: str, provider: dict[str, Any], context: dict[str, Any]):
+    system_prompt = (
+        "You are an OpenStack assistant. "
+        "Answer as general OpenStack knowledge, but use the provided context as grounded guidance. "
+        "If the context describes an OpenStack Placement or Nova trait, explain what the trait is for, how it affects scheduling, and note when the explanation is inferred from the naming convention. "
+        "Respond as plain text only, not JSON. "
+        "Start with a short summary paragraph, then use short bullet points when helpful. "
+        "Do not use markdown headers."
+    )
+    yield from _provider_stream_text(provider, system_prompt, {"query": query, "context": context})
 
 
 def answer_domain_chat(query: str, provider: dict[str, Any]) -> dict[str, Any]:

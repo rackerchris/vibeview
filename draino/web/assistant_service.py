@@ -53,11 +53,17 @@ from .assistant_environment_answers import (
 from .assistant_synthesis import (
     answer_domain_chat,
     answer_platform_knowledge,
+    answer_platform_knowledge_with_context,
     stream_domain_chat,
     stream_platform_knowledge,
+    stream_platform_knowledge_with_context,
     synthesize_network_diagnosis,
 )
 from .assistant_followups import answer_followup_query
+from .assistant_openstack_knowledge import (
+    build_platform_knowledge_context,
+    fallback_platform_knowledge_answer,
+)
 from ..operations import openstack_ops
 
 _ASSISTANT_BASE_URL = os.getenv("DRAINO_ASSISTANT_BASE_URL", "").strip()
@@ -193,6 +199,10 @@ _OPENSTACK_KNOWLEDGE_TERMS = (
     "backup",
     "flavor",
     "hypervisor",
+    "placement",
+    "trait",
+    "traits",
+    "resource provider",
     "availability zone",
     "az",
     "tenant",
@@ -570,6 +580,8 @@ def _classify_unhandled_query(query: str, project_context: dict[str, str]) -> st
     lower = str(query or "").strip().lower()
     if not lower:
         return "unknown"
+    if build_platform_knowledge_context(query):
+        return "platform_knowledge"
     signals = _intent_signals(lower)
     if project_context.get("project_id") and _contains_any(lower, ("network", "networking", "router", "port", "floating ip", "security group", "load balancer")) and _contains_any(lower, ("unhealthy", "risk", "problem", "wrong", "look at first", "investigate", "concerning", "issue")):
         return "grounded_diagnosis_network"
@@ -2068,13 +2080,25 @@ def answer_assistant_query(
                     "scope": project_context,
                 }
         elif intent == "platform_knowledge":
+            knowledge_context = build_platform_knowledge_context(text)
+            used_provider = False
             if assistant_provider_enabled():
                 try:
-                    synthesized = answer_platform_knowledge(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
+                    if knowledge_context:
+                        synthesized = answer_platform_knowledge_with_context(
+                            text,
+                            _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS),
+                            knowledge_context,
+                        )
+                    else:
+                        synthesized = answer_platform_knowledge(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
+                    used_provider = bool(synthesized)
                 except Exception:
                     synthesized = {}
             else:
                 synthesized = {}
+            if not synthesized and knowledge_context:
+                synthesized = fallback_platform_knowledge_answer(text, knowledge_context)
             response = {
                 "intent": "platform_knowledge",
                 "answer": synthesized.get("answer") or "I need the provider path enabled to answer that as general OpenStack knowledge.",
@@ -2083,8 +2107,8 @@ def answer_assistant_query(
                 "actions": [],
                 "needs_clarification": False,
                 "mode": "platform_knowledge",
-                "provenance": "General OpenStack knowledge",
-                "answer_source": "xerotier" if synthesized else "local",
+                "provenance": "General OpenStack knowledge with trait context" if knowledge_context else "General OpenStack knowledge",
+                "answer_source": "xerotier" if used_provider else "local",
             }
         elif intent == "domain_chat":
             if assistant_provider_enabled():
@@ -2322,27 +2346,40 @@ def stream_assistant_query(
     }
     task = _classify_unhandled_query(text, project_context)
     if task == "platform_knowledge":
+        knowledge_context = build_platform_knowledge_context(text)
         parse_ms = 0.0
         meta = {
             "intent": "platform_knowledge",
             "parser_source": "task-router",
             "answer_source": "xerotier" if assistant_provider_enabled() else "local",
             "mode": "platform_knowledge",
-            "provenance": "General OpenStack knowledge",
+            "provenance": "General OpenStack knowledge with trait context" if knowledge_context else "General OpenStack knowledge",
         }
         yield {"type": "meta", "meta": meta}
         if assistant_provider_enabled():
             chunks: list[str] = []
             answer_started = time.perf_counter()
             try:
-                for chunk in stream_platform_knowledge(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS)):
+                streamer = (
+                    stream_platform_knowledge_with_context(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS), knowledge_context)
+                    if knowledge_context
+                    else stream_platform_knowledge(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
+                )
+                for chunk in streamer:
                     if not chunk:
                         continue
                     chunks.append(chunk)
                     yield {"type": "delta", "text": chunk}
                 answer = "".join(chunks).strip()
             except Exception:
-                fallback = answer_platform_knowledge(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
+                fallback = (
+                    answer_platform_knowledge_with_context(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS), knowledge_context)
+                    if knowledge_context
+                    else answer_platform_knowledge(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
+                )
+                answer = str(fallback.get("answer") or "").strip()
+            if not answer and knowledge_context:
+                fallback = fallback_platform_knowledge_answer(text, knowledge_context)
                 answer = str(fallback.get("answer") or "").strip()
             answer_ms = round((time.perf_counter() - answer_started) * 1000, 1)
             yield {
@@ -2357,7 +2394,7 @@ def stream_assistant_query(
                     "parser_source": "task-router",
                     "answer_source": "xerotier",
                     "mode": "platform_knowledge",
-                    "provenance": "General OpenStack knowledge",
+                    "provenance": "General OpenStack knowledge with trait context" if knowledge_context else "General OpenStack knowledge",
                     "provider_enabled": True,
                     "timings": {
                         "parse_ms": parse_ms,
@@ -2379,7 +2416,7 @@ def stream_assistant_query(
                 "parser_source": "task-router",
                 "answer_source": "local",
                 "mode": "platform_knowledge",
-                "provenance": "General OpenStack knowledge",
+                "provenance": "General OpenStack knowledge with trait context" if knowledge_context else "General OpenStack knowledge",
                 "provider_enabled": False,
                 "timings": {
                     "parse_ms": parse_ms,

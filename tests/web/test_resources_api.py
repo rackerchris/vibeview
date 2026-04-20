@@ -10,6 +10,7 @@ from draino.web import assistant_evidence
 from draino.web import assistant_cluster_answers
 from draino.web import assistant_environment_answers
 from draino.web import assistant_followups
+from draino.web import assistant_openstack_knowledge
 from draino.web import assistant_service
 from draino.web import assistant_resource_answers
 from draino.web import resource_helpers
@@ -3146,6 +3147,69 @@ def test_assistant_service_answers_platform_knowledge(monkeypatch):
     assert "public address" in result["answer"]
     assert result["parser_source"] == "task-router"
     assert result["answer_source"] == "xerotier"
+
+
+def test_openstack_knowledge_context_extracts_placement_trait():
+    context = assistant_openstack_knowledge.build_platform_knowledge_context(
+        "what is the COMPUTE_NET_VIF_MODEL_RTL8139 trait for?"
+    )
+
+    assert context["kind"] == "placement_trait"
+    assert context["trait"] == "COMPUTE_NET_VIF_MODEL_RTL8139"
+    assert context["category"] == "virtual NIC model trait"
+    assert "RTL8139" in context["details"][0]
+
+
+def test_assistant_service_answers_platform_knowledge_for_placement_trait_with_context(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: (_ for _ in ()).throw(AssertionError("provider parse should be skipped for platform knowledge")),
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "answer_platform_knowledge_with_context",
+        lambda query, provider, context: {
+            "answer": "COMPUTE_NET_VIF_MODEL_RTL8139 is a Placement trait used to advertise support for the RTL8139 virtual NIC model on compute hosts so workloads that require that NIC model can be scheduled there.",
+            "confidence": 0.88,
+        },
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "what is the COMPUTE_NET_VIF_MODEL_RTL8139 trait for?",
+        auth=None,
+    )
+
+    assert result["intent"] == "platform_knowledge"
+    assert result["mode"] == "platform_knowledge"
+    assert "RTL8139 virtual NIC model" in result["answer"]
+    assert result["answer_source"] == "xerotier"
+    assert result["provenance"] == "General OpenStack knowledge with trait context"
+
+
+def test_assistant_service_falls_back_locally_for_placement_trait_when_provider_disabled(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: False)
+
+    result = assistant_service.answer_assistant_query(
+        "what is the COMPUTE_NET_VIF_MODEL_RTL8139 trait for?",
+        auth=None,
+    )
+
+    assert result["intent"] == "platform_knowledge"
+    assert result["answer_source"] == "local"
+    assert "Placement" in result["answer"]
+    assert "RTL8139" in result["answer"]
 
 
 def test_assistant_service_answers_platform_knowledge_for_router_definition(monkeypatch):
