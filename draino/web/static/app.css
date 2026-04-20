@@ -2596,6 +2596,47 @@ body.no-hints .vmware-ref-card { display: none !important; }
 }
 .session-panel-sub { font-size: 11px; color: var(--dim); margin-top: 2px; }
 .session-panel-body { padding: 14px; display: grid; gap: 12px; }
+.clone-workflow-table tbody tr:hover { background: transparent; }
+.clone-workflow-task-title {
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.clone-workflow-task-sub {
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.clone-workflow-task-error {
+  color: var(--red);
+  font-size: 11px;
+  margin-top: 6px;
+}
+.clone-workflow-parallel-tag {
+  display: inline-flex;
+  margin-top: 6px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #ede7f6;
+  color: #6a1b9a;
+  font-size: 10px;
+  font-weight: 700;
+}
+.clone-workflow-resource-kind {
+  color: var(--dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+.clone-workflow-section {
+  display: grid;
+  gap: 6px;
+}
+.clone-workflow-section-title {
+  font-weight: 700;
+  color: var(--text);
+}
 .session-detail-box {
   padding: 10px 12px;
   border-left: 4px solid var(--blue);

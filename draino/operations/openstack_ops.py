@@ -430,6 +430,11 @@ def _resolve_flavor_data(conn, flavor_ref) -> dict:
             flavor = conn.compute.get_flavor(flavor_id)
         except Exception:
             flavor = None
+    if flavor is None and flavor_id:
+        try:
+            flavor = conn.compute.find_flavor(flavor_id, ignore_missing=True)
+        except Exception:
+            flavor = None
     if flavor is None and flavor_name:
         try:
             flavor = conn.compute.find_flavor(flavor_name, ignore_missing=True)

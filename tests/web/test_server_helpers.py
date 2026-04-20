@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from draino.models import NodeState
 from draino.web import resource_helpers
 from draino.web import server as web_server
@@ -386,17 +388,174 @@ def test_clone_instance_creates_ports_volumes_server_and_floating_ip(monkeypatch
     )
 
     assert result["server_id"] == "clone-vm-1"
+    assert result["server_name"] == "vv-vm-1-clone"
     assert result["floating_ip_id"] == "fip-clone-1"
     assert created_ports[0]["network_id"] == "net-1"
+    assert created_ports[0]["name"].startswith("vv-vm-1-clone-")
     assert created_ports[0]["security_group_ids"] == ["sg-1", "sg-2"]
     assert [item["source_volid"] for item in created_volumes] == ["root-vol", "data-vol"]
-    assert created_server["name"] == "vm-1-clone"
+    assert created_volumes[0]["name"].startswith("vv-vm-1-clone-")
+    assert created_server["name"] == "vv-vm-1-clone"
     assert created_server["flavor_id"] == "flavor-1"
     assert created_server["networks"] == [{"port": "clone-port-1"}]
     assert created_server["block_device_mapping_v2"][0]["uuid"] == "clone-root-vol"
     assert created_server["block_device_mapping_v2"][1]["uuid"] == "clone-data-vol"
     assert created_ips[0]["floating_network_id"] == "ext-net-1"
     assert created_ips[0]["port_id"] == "clone-port-1"
+
+
+def test_clone_instance_requires_resolved_flavor(monkeypatch):
+    class FakeServer:
+        id = "vm-1"
+        name = "vm-1"
+        status = "ACTIVE"
+        image = None
+        flavor = {"id": ""}
+        attached_volumes = []
+
+        def to_dict(self):
+            return {"project_id": "proj-1"}
+
+    class FakeNetworkAPI:
+        @staticmethod
+        def ports(device_id=None):
+            return [SimpleNamespace(id="port-1", network_id="net-1", to_dict=lambda: {"network_id": "net-1"})]
+
+    class FakeComputeAPI:
+        @staticmethod
+        def get_server(server_id):
+            return FakeServer()
+
+    class FakeConn:
+        compute = FakeComputeAPI()
+        network = FakeNetworkAPI()
+        block_storage = None
+        current_project_id = "proj-1"
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "_resolve_flavor_data", lambda conn, flavor_ref: {})
+
+    with pytest.raises(RuntimeError, match="Source flavor could not be resolved for clone preflight"):
+        resource_helpers.clone_instance(
+            "vm-1",
+            new_name="vm-1-clone",
+            auth=None,
+        )
+
+
+def test_clone_instance_resolves_named_flavor_ref_to_uuid(monkeypatch):
+    created_server = {}
+
+    class FakeServer:
+        id = "vm-1"
+        name = "vm-1"
+        status = "ACTIVE"
+        image = None
+        flavor = {"id": "m1.small"}
+        attached_volumes = [{"id": "root-vol"}]
+
+        def to_dict(self):
+            return {"project_id": "proj-1"}
+
+    class FakeSourcePort:
+        id = "port-1"
+        network_id = "net-1"
+
+        def to_dict(self):
+            return {"network_id": "net-1"}
+
+    class FakeFlavor:
+        id = "d5e8faba-aa99-473d-8105-24707e37fa67"
+        name = "m1.small"
+        vcpus = 4
+        ram = 2048
+        disk = 18
+        ephemeral = 0
+        swap = 0
+
+    class FakeNetworkAPI:
+        @staticmethod
+        def ports(device_id=None):
+            return [FakeSourcePort()]
+
+        @staticmethod
+        def create_port(**attrs):
+            return SimpleNamespace(id="clone-port-1", name=attrs.get("name", ""))
+
+        @staticmethod
+        def ips(port_id=None):
+            return []
+
+        @staticmethod
+        def delete_port(*args, **kwargs):
+            return None
+
+    class FakeBlockStorageAPI:
+        @staticmethod
+        def get_volume(volume_id):
+            return SimpleNamespace(
+                id="root-vol",
+                name="root",
+                status="available",
+                attachments=[{"server_id": "vm-1", "device": "/dev/vda"}],
+                to_dict=lambda: {"attachments": [{"server_id": "vm-1", "device": "/dev/vda"}]},
+            )
+
+        @staticmethod
+        def create_volume(**attrs):
+            return SimpleNamespace(id="clone-root-vol", name=attrs.get("name", "clone-root-vol"))
+
+        @staticmethod
+        def delete_volume(*args, **kwargs):
+            return None
+
+    class FakeComputeAPI:
+        @staticmethod
+        def get_server(server_id):
+            if server_id == "vm-1":
+                return FakeServer()
+            if server_id == "clone-vm-1":
+                return SimpleNamespace(id="clone-vm-1", status="ACTIVE", to_dict=lambda: {"id": "clone-vm-1", "status": "ACTIVE"})
+            raise AssertionError(f"unexpected server lookup {server_id}")
+
+        @staticmethod
+        def get_flavor(flavor_id):
+            raise RuntimeError("lookup by embedded flavor id failed")
+
+        @staticmethod
+        def find_flavor(flavor_name, ignore_missing=True):
+            assert flavor_name == "m1.small"
+            return FakeFlavor()
+
+        @staticmethod
+        def create_server(**attrs):
+            created_server.update(attrs)
+            return SimpleNamespace(id="clone-vm-1")
+
+        @staticmethod
+        def delete_server(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def stop_server(*args, **kwargs):
+            return None
+
+    class FakeConn:
+        compute = FakeComputeAPI()
+        network = FakeNetworkAPI()
+        block_storage = FakeBlockStorageAPI()
+        current_project_id = "proj-1"
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+
+    result = resource_helpers.clone_instance(
+        "vm-1",
+        new_name="vm-1-clone",
+        auth=None,
+    )
+
+    assert result["flavor_id"] == "d5e8faba-aa99-473d-8105-24707e37fa67"
+    assert created_server["flavor_id"] == "d5e8faba-aa99-473d-8105-24707e37fa67"
 
 
 def test_get_network_detail_includes_metadata_port_for_matching_subnet(monkeypatch):

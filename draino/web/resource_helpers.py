@@ -11,6 +11,7 @@ from ..operations import k8s_ops, openstack_ops
 _OPEN_WORLD_CIDRS = {"0.0.0.0/0", "::/0"}
 _ADMIN_PORTS = {22, 3389, 5900, 6443}
 _CLONE_LOG = logging.getLogger("draino.clone")
+_CLONE_NAME_PREFIX = "vv-"
 
 
 class CloneWorkflowError(RuntimeError):
@@ -32,6 +33,14 @@ class CloneWorkflowError(RuntimeError):
         self.created_resources = dict(created_resources or {})
         self.cleanup_actions = list(cleanup_actions or [])
         self.residual_resources = list(residual_resources or [])
+
+
+def _clone_prefixed_name(value: str, fallback: str = "clone") -> str:
+    label = str(value or "").strip()
+    normalized = label or fallback
+    if normalized.lower().startswith(("vv-", "vibeview-")):
+        return normalized
+    return f"{_CLONE_NAME_PREFIX}{normalized}"
 
 
 def coerce_bool(value: object) -> bool:
@@ -2984,6 +2993,7 @@ def clone_instance(
     requested_name = str(new_name or "").strip()
     if not requested_name:
         raise ValueError("new_name is required")
+    requested_name = _clone_prefixed_name(requested_name, "clone")
     project_id = openstack_ops._server_project_id(source) or getattr(conn, "current_project_id", None) or ""
     availability_zone = getattr(source, "availability_zone", None) or source_data.get("OS-EXT-AZ:availability_zone") or ""
     key_name = getattr(source, "key_name", None) or source_data.get("key_name") or ""
@@ -2991,13 +3001,13 @@ def clone_instance(
     flavor_ref = getattr(source, "flavor", None) or source_data.get("flavor") or {}
     flavor = openstack_ops._resolve_flavor_data(conn, flavor_ref)
     flavor_id = (
-        getattr(flavor_ref, "id", None)
+        flavor.get("id")
+        or getattr(flavor_ref, "id", None)
         or (flavor_ref.get("id") if isinstance(flavor_ref, dict) else None)
-        or flavor.get("id")
         or ""
     )
-    if not flavor_id:
-        raise RuntimeError("Unable to resolve source flavor id for clone")
+    if not flavor_id or not flavor:
+        raise RuntimeError("Source flavor could not be resolved for clone preflight")
     _CLONE_LOG.debug("clone step=source_resolved instance_id=%s flavor_id=%s", instance_id, flavor_id)
     progress("resolve_source", "Resolve Source Topology", f"Resolved flavor {flavor_id} and source metadata.")
 
@@ -3031,7 +3041,7 @@ def clone_instance(
         cloned_ports = [_create_port_clone(conn, port, requested_name, project_id) for port in source_ports]
         created_ports = [item["id"] for item in cloned_ports if item.get("id")]
         _CLONE_LOG.debug("clone step=create_ports complete instance_id=%s created_ports=%s", instance_id, created_ports)
-        progress("create_ports", "Clone Neutron Ports", f"Created {len(created_ports)} port(s) for the clone.", "running", {
+        progress("create_ports", "Clone Neutron Ports", f"Created {len(created_ports)} port(s) for the clone: {', '.join(created_ports) or 'none'}.", "running", {
             "created_resources": created_resources_snapshot(),
         })
 
@@ -3067,7 +3077,7 @@ def clone_instance(
                 _CLONE_LOG.debug("clone step=skip_data_volume instance_id=%s volume_id=%s", instance_id, volume_id)
                 continue
             source_volume_data = _obj_dict(volume)
-            clone_name = f"{requested_name}-{getattr(volume, 'name', None) or source_volume_data.get('name') or volume_id}"
+            clone_name = _clone_prefixed_name(f"{requested_name}-{getattr(volume, 'name', None) or source_volume_data.get('name') or volume_id}", "volume")
             progress("clone_volume", "Clone Cinder Volumes", f"Cloning volume {volume_id} as {clone_name}.", "running", {
                 "resource_type": "volume",
                 "source_id": volume_id,
@@ -3133,7 +3143,7 @@ def clone_instance(
                 "created_resources": created_resources_snapshot(),
             })
             _CLONE_LOG.debug("clone step=create_snapshot start instance_id=%s", instance_id)
-            snapshot_image_id = _compute_create_server_image(conn, instance_id, f"{requested_name}-snapshot")
+            snapshot_image_id = _compute_create_server_image(conn, instance_id, _clone_prefixed_name(f"{requested_name}-snapshot", "snapshot"))
             image = _wait_for_status(
                 lambda: conn.image.get_image(snapshot_image_id),
                 lambda item: getattr(item, "status", None) or _obj_dict(item).get("status"),
