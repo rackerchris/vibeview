@@ -2271,7 +2271,7 @@ body.no-hints .vmware-ref-card { display: none !important; }
   overflow: auto;
 }
 .project-clone-shell {
-  width: min(70vw, 1040px);
+  width: min(86vw, 1280px);
   max-width: 100%;
   max-height: calc(100vh - 64px);
   background: var(--white);
@@ -2597,6 +2597,11 @@ body.no-hints .vmware-ref-card { display: none !important; }
 .session-panel-sub { font-size: 11px; color: var(--dim); margin-top: 2px; }
 .session-panel-body { padding: 14px; display: grid; gap: 12px; }
 .clone-workflow-table tbody tr:hover { background: transparent; }
+.clone-workflow-row-completed td { background: #edf7ef; }
+.clone-workflow-row-failed td { background: #fff0f0; }
+.clone-workflow-row-running td { background: #eef6ff; }
+.clone-workflow-row-skipped td { background: #f6f8fa; }
+.clone-workflow-row-pending td { background: var(--white); }
 .clone-workflow-task-title {
   font-weight: 700;
   color: var(--text);

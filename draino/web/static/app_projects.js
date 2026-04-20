@@ -783,101 +783,120 @@ function projectCloneTimelineEntries() {
   return Array.isArray(projectCloneState.status?.timeline) ? projectCloneState.status.timeline : [];
 }
 
-function projectCloneEntryResource(entry = {}) {
-  const created = entry.created_resources || {};
-  const resourceType = String(entry.resource_type || '').trim();
-  const resourceId = String(entry.resource_id || '').trim();
-  if (resourceType || resourceId) {
-    return {
-      kind: resourceType || 'resource',
-      value: resourceId || '—',
-    };
-  }
-  const stepKey = String(entry.step_key || '').trim();
-  if (stepKey === 'fetch_source') {
-    return {
-      kind: 'server',
-      value: projectCloneState.status?.source_instance_id || projectCloneState.trackedInstanceId || '—',
-    };
-  }
-  if (stepKey === 'resolve_source') {
-    const flavor = projectCloneState.source?.flavor || {};
-    return {
-      kind: 'flavor',
-      value: String(flavor.id || flavor.name || '—'),
-    };
-  }
-  if (stepKey === 'create_ports') {
-    const ports = Array.isArray(created.ports) ? created.ports.map((item) => item?.id).filter(Boolean) : [];
-    return {
-      kind: 'ports',
-      value: ports.length ? ports.join(', ') : '—',
-    };
-  }
-  if (stepKey === 'clone_volume' || stepKey === 'resolve_volumes') {
-    const volumes = Array.isArray(created.volumes) ? created.volumes.map((item) => item?.id).filter(Boolean) : [];
-    return {
-      kind: 'volumes',
-      value: resourceId || (volumes.length ? volumes.join(', ') : '—'),
-    };
-  }
-  if (stepKey === 'create_snapshot') {
-    const images = Array.isArray(created.snapshot_images) ? created.snapshot_images.map((item) => item?.id).filter(Boolean) : [];
-    return {
-      kind: 'snapshot image',
-      value: images.length ? images.join(', ') : '—',
-    };
-  }
-  if (stepKey === 'create_server' || stepKey === 'wait_server' || stepKey === 'power_off') {
-    const servers = Array.isArray(created.servers) ? created.servers.map((item) => item?.id).filter(Boolean) : [];
-    return {
-      kind: 'server',
-      value: servers.length ? servers.join(', ') : '—',
-    };
-  }
-  if (stepKey === 'create_floating_ip') {
-    const floatingIps = Array.isArray(created.floating_ips) ? created.floating_ips.map((item) => item?.id).filter(Boolean) : [];
-    return {
-      kind: 'floating ip',
-      value: floatingIps.length ? floatingIps.join(', ') : 'none',
-    };
-  }
-  if (stepKey === 'completed') {
-    const serverId = projectCloneState.status?.result?.server_id || '—';
-    return {
-      kind: 'server',
-      value: serverId,
-    };
-  }
-  return {
-    kind: 'resource',
-    value: '—',
+function projectCloneGroupedRows(status = projectCloneState.status) {
+  const entries = Array.isArray(status?.timeline) ? status.timeline : [];
+  const byKey = new Map();
+  entries.forEach((entry) => {
+    const key = String(entry.step_key || '').trim();
+    if (!key) return;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(entry);
+  });
+  const flavor = projectCloneState.source?.flavor || {};
+  const created = status?.created_resources || {};
+  const rows = [];
+  const createdPorts = Array.isArray(created.ports) ? created.ports.map((item) => item?.id).filter(Boolean) : [];
+  const createdVolumes = Array.isArray(created.volumes) ? created.volumes.map((item) => item?.id).filter(Boolean) : [];
+  const createdImages = Array.isArray(created.snapshot_images) ? created.snapshot_images.map((item) => item?.id).filter(Boolean) : [];
+  const createdServers = Array.isArray(created.servers) ? created.servers.map((item) => item?.id).filter(Boolean) : [];
+  const createdFloatingIps = Array.isArray(created.floating_ips) ? created.floating_ips.map((item) => item?.id).filter(Boolean) : [];
+
+  const addRow = (row) => {
+    if (!row) return;
+    rows.push(row);
   };
-}
 
-function projectCloneStatusIndicator(entry = {}) {
-  const state = String(entry.state || '').toLowerCase();
-  if (state === 'completed') return { cls: 'check', text: 'Check', icon: '✓' };
-  if (state === 'failed') return { cls: 'cross', text: 'X', icon: '✕' };
-  if (state === 'running') return { cls: 'dash', text: 'Live', icon: '…' };
-  return { cls: 'dash', text: 'Pending', icon: '•' };
-}
+  const failureStep = String(status?.step_key || '').trim();
+  const failureError = String(status?.error || '').trim();
 
-function projectCloneTaskDescription(entry = {}) {
-  const detail = String(entry.detail || '').trim();
-  const stepKey = String(entry.step_key || '').trim();
-  const suffix = detail ? `<div class="clone-workflow-task-sub">${esc(detail)}</div>` : '';
-  if (stepKey === 'clone_volume') {
-    const sourceId = String(entry.source_id || '').trim();
-    return `${sourceId ? `<div class="clone-workflow-task-sub">Source volume: <span class="mono">${esc(sourceId)}</span></div>` : ''}${suffix}`;
+  addRow({
+    key: 'source',
+    task: 'Source Instance',
+    description: 'Load source server context and resolve the clone flavor.',
+    resourceKind: 'Server / Flavor',
+    resourceValue: [status?.source_instance_id || projectCloneState.trackedInstanceId || '', flavor.id || flavor.name || ''].filter(Boolean).join(' · ') || '—',
+    state: failureStep === 'fetch_source' || failureStep === 'resolve_source' ? 'failed' : (byKey.has('resolve_source') ? 'completed' : byKey.has('fetch_source') ? 'running' : 'pending'),
+    statusText: failureStep === 'fetch_source' || failureStep === 'resolve_source' ? 'Failed' : byKey.has('resolve_source') ? 'Resolved' : byKey.has('fetch_source') ? 'Resolving' : 'Pending',
+    error: (failureStep === 'fetch_source' || failureStep === 'resolve_source') ? failureError : '',
+  });
+
+  addRow({
+    key: 'ports',
+    task: 'Ports',
+    description: 'Resolve and clone Neutron ports as one operation.',
+    resourceKind: 'Ports',
+    resourceValue: createdPorts.length ? createdPorts.join(', ') : '—',
+    state: failureStep === 'resolve_ports' || failureStep === 'create_ports' ? 'failed' : (createdPorts.length ? 'completed' : byKey.has('resolve_ports') || byKey.has('create_ports') ? 'running' : 'pending'),
+    statusText: failureStep === 'resolve_ports' || failureStep === 'create_ports' ? 'Failed' : createdPorts.length ? 'Cloned' : byKey.has('resolve_ports') || byKey.has('create_ports') ? 'Cloning' : 'Pending',
+    error: (failureStep === 'resolve_ports' || failureStep === 'create_ports') ? failureError : '',
+  });
+
+  if (byKey.has('resolve_volumes') || byKey.has('clone_volume') || createdVolumes.length) {
+    addRow({
+      key: 'volumes',
+      task: 'Volumes',
+      description: 'Resolve attached volumes and clone the ones selected for the new server.',
+      resourceKind: 'Volumes',
+      resourceValue: createdVolumes.length ? createdVolumes.join(', ') : 'none',
+      state: failureStep === 'resolve_volumes' || failureStep === 'clone_volume' ? 'failed' : (createdVolumes.length ? 'completed' : byKey.has('resolve_volumes') || byKey.has('clone_volume') ? 'running' : 'pending'),
+      statusText: failureStep === 'resolve_volumes' || failureStep === 'clone_volume' ? 'Failed' : createdVolumes.length ? 'Cloned' : byKey.has('resolve_volumes') || byKey.has('clone_volume') ? 'Cloning' : 'Pending',
+      error: (failureStep === 'resolve_volumes' || failureStep === 'clone_volume') ? failureError : '',
+    });
   }
-  return suffix;
+
+  if (byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') || byKey.has('completed') || createdServers.length || createdImages.length) {
+    const serverResource = [
+      createdImages.length ? createdImages.join(', ') : '',
+      createdServers.length ? createdServers.join(', ') : (status?.result?.server_id || ''),
+    ].filter(Boolean).join(' · ');
+    const buildFailed = ['create_snapshot', 'create_server', 'wait_server', 'power_off', 'completed'].includes(failureStep);
+    addRow({
+      key: 'build',
+      task: 'Server Build',
+      description: 'Create any snapshot image needed, build the server, and wait for the final power state.',
+      resourceKind: createdImages.length ? 'Snapshot / Server' : 'Server',
+      resourceValue: serverResource || '—',
+      state: buildFailed ? 'failed' : (String(status?.state || '').toLowerCase() === 'completed' ? 'completed' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'running' : 'pending'),
+      statusText: buildFailed ? 'Failed' : (String(status?.state || '').toLowerCase() === 'completed' ? 'Built' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'Building' : 'Pending'),
+      error: buildFailed ? failureError : '',
+    });
+  }
+
+  if (status?.result?.floating_ip_requested || byKey.has('create_floating_ip') || createdFloatingIps.length) {
+    const floatingIpFailed = failureStep === 'create_floating_ip';
+    const floatingIpSkipped = byKey.has('create_floating_ip') && !createdFloatingIps.length && !floatingIpFailed && String(status?.state || '').toLowerCase() !== 'running';
+    addRow({
+      key: 'floating_ip',
+      task: 'Floating IP',
+      description: 'Allocate and attach a new floating IP if requested.',
+      resourceKind: 'Floating IP',
+      resourceValue: createdFloatingIps.length ? createdFloatingIps.join(', ') : 'none',
+      state: floatingIpFailed ? 'failed' : createdFloatingIps.length ? 'completed' : (floatingIpSkipped ? 'skipped' : byKey.has('create_floating_ip') ? 'running' : 'pending'),
+      statusText: floatingIpFailed ? 'Failed' : createdFloatingIps.length ? 'Allocated' : (floatingIpSkipped ? 'Skipped' : byKey.has('create_floating_ip') ? 'Allocating' : 'Pending'),
+      error: floatingIpFailed ? failureError : '',
+    });
+  }
+
+  if (Array.isArray(status?.cleanup_actions) && status.cleanup_actions.length) {
+    addRow({
+      key: 'cleanup',
+      task: 'Rollback',
+      description: 'Delete resources that were created before the clone failed.',
+      resourceKind: 'Rollback',
+      resourceValue: status.cleanup_actions.map((item) => item.resource_id).filter(Boolean).join(', ') || '—',
+      state: Array.isArray(status?.residual_resources) && status.residual_resources.length ? 'failed' : 'completed',
+      statusText: Array.isArray(status?.residual_resources) && status.residual_resources.length ? 'Partial Cleanup' : 'Cleaned Up',
+      error: Array.isArray(status?.residual_resources) && status.residual_resources.length ? `${status.residual_resources.length} leftover resource(s) still need attention.` : '',
+    });
+  }
+
+  return rows;
 }
 
 function renderProjectCloneWorkflowPanel() {
   const status = projectCloneState.status;
   if (!status) return '';
-  const entries = projectCloneTimelineEntries();
+  const rows = projectCloneGroupedRows(status);
   const cleanupRows = Array.isArray(status.cleanup_actions) ? status.cleanup_actions : [];
   const residualRows = Array.isArray(status.residual_resources) ? status.residual_resources : [];
   const summaryResourceCounts = {
@@ -914,32 +933,26 @@ function renderProjectCloneWorkflowPanel() {
         <table class="data-table clone-workflow-table" style="margin-bottom:0">
           <thead>
             <tr>
-              <th style="width:34%">Task</th>
-              <th style="width:18%">Live Status</th>
-              <th style="width:30%">Resource</th>
-              <th style="width:18%">Status</th>
+              <th style="width:40%">Task</th>
+              <th style="width:36%">Resource</th>
+              <th style="width:24%">Status</th>
             </tr>
           </thead>
           <tbody>
-            ${entries.length ? entries.map((entry) => {
-              const resource = projectCloneEntryResource(entry);
-              const indicator = projectCloneStatusIndicator(entry);
-              const liveState = String(entry.state || 'unknown');
-              return `<tr>
+            ${rows.length ? rows.map((row) => {
+              return `<tr class="clone-workflow-row clone-workflow-row-${escAttr(row.state)}">
                 <td>
-                  <div class="clone-workflow-task-title">${esc(entry.step_label || entry.step_key || 'Clone Step')}</div>
-                  ${projectCloneTaskDescription(entry)}
-                  ${entry.source_id ? '<span class="clone-workflow-parallel-tag">Parallel lane</span>' : ''}
-                  ${entry.error ? `<div class="clone-workflow-task-error">${esc(entry.error)}</div>` : ''}
+                  <div class="clone-workflow-task-title">${esc(row.task)}</div>
+                  <div class="clone-workflow-task-sub">${esc(row.description)}</div>
+                  ${row.error ? `<div class="clone-workflow-task-error">${esc(row.error)}</div>` : ''}
                 </td>
-                <td><span class="status-pill ${escAttr(liveState === 'completed' ? 'done' : liveState === 'failed' ? 'failed' : liveState === 'running' ? 'running' : 'waiting')}">${esc(liveState)}</span></td>
                 <td>
-                  <div class="clone-workflow-resource-kind">${esc(resource.kind)}</div>
-                  <div class="mono">${esc(resource.value)}</div>
+                  <div class="clone-workflow-resource-kind">${esc(row.resourceKind)}</div>
+                  <div class="mono">${esc(row.resourceValue)}</div>
                 </td>
-                <td><span class="${escAttr(indicator.cls)}">${esc(`${indicator.icon} ${indicator.text}`)}</span></td>
+                <td><span class="status-pill ${escAttr(row.state === 'completed' ? 'done' : row.state === 'failed' ? 'failed' : row.state === 'running' ? 'running' : row.state === 'skipped' ? 'waiting' : 'waiting')}">${esc(row.statusText)}</span></td>
               </tr>`;
-            }).join('') : '<tr><td colspan="4" style="color:var(--dim)">No clone workflow events have been recorded yet.</td></tr>'}
+            }).join('') : '<tr><td colspan="3" style="color:var(--dim)">No clone workflow events have been recorded yet.</td></tr>'}
           </tbody>
         </table>
         ${cleanupRows.length ? `
