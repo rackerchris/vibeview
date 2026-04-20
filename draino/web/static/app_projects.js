@@ -9,6 +9,7 @@ const projectCloneState = {
   createFloatingIp: true,
   powerOn: true,
   keepMetadata: true,
+  submitting: false,
   message: '',
   tone: 'info',
 };
@@ -631,6 +632,7 @@ function openProjectClonePlanner(instanceId) {
   projectCloneState.createFloatingIp = true;
   projectCloneState.powerOn = true;
   projectCloneState.keepMetadata = true;
+  projectCloneState.submitting = false;
   projectCloneState.message = '';
   projectCloneState.tone = 'info';
   renderProjectCloneOverlay();
@@ -639,6 +641,7 @@ function openProjectClonePlanner(instanceId) {
 function closeProjectClonePlanner() {
   projectCloneState.open = false;
   projectCloneState.source = null;
+  projectCloneState.submitting = false;
   projectCloneState.message = '';
   const overlay = document.getElementById('project-clone-overlay');
   if (overlay) overlay.classList.remove('open');
@@ -670,9 +673,9 @@ function restoreProjectCloneFocusState(container, state) {
   }
 }
 
-function submitProjectClonePlanner() {
+async function submitProjectClonePlanner() {
   const instance = projectCloneState.source;
-  if (!instance) return;
+  if (!instance || projectCloneState.submitting) return;
   const ports = Array.isArray(instance.ports) ? instance.ports : [];
   const newName = String(projectCloneState.newName || '').trim();
   if (!newName) {
@@ -684,22 +687,49 @@ function submitProjectClonePlanner() {
     return;
   }
   const dataVolumeCount = projectCloneVolumeRows(instance).filter((item) => item.role === 'Data volume' && item.cloneable).length;
-  const method = instance.is_volume_backed ? 'clone boot volume + boot new server' : 'snapshot source server + boot new server';
-  const sourceFloatingIpCount = ports
-    .flatMap((port) => port.floating_ips || [])
-    .map((ip) => (typeof ip === 'string' ? ip : (ip.address || ip.floating_ip_address || '')))
-    .filter(Boolean)
-    .length;
-  onLog?.({
-    node: '-',
-    message: `Clone plan prepared for ${instance.name || instance.id}: create ${newName} via ${method}; data volumes ${projectCloneState.cloneDataVolumes ? `enabled (${dataVolumeCount})` : 'skipped'}; floating IP ${projectCloneState.createFloatingIp ? (sourceFloatingIpCount ? 'create new external IP' : 'create new external IP if needed') : 'do not create'}; power ${projectCloneState.powerOn ? 'on' : 'off'}.`,
-    color: 'important',
-  });
-  projectCloneState.message = projectCloneState.createFloatingIp
-    ? 'Clone planner is now wired up. Backend execution is still not implemented in this build, but the action is no longer a dead click. The default plan requests a new floating IP for the clone.'
-    : 'Clone planner is now wired up. Backend execution is still not implemented in this build, but the action is no longer a dead click. No floating IP will be created automatically; reassociation stays manual.';
-  projectCloneState.tone = 'warn';
+  projectCloneState.submitting = true;
+  projectCloneState.message = `Submitting clone for ${instance.name || instance.id || 'instance'}${projectCloneState.cloneDataVolumes ? ` with ${dataVolumeCount} cloned data volume(s)` : ''}.`;
+  projectCloneState.tone = 'info';
   renderProjectCloneOverlay();
+  try {
+    const resp = await fetch(`/api/instances/${encodeURIComponent(instance.id)}/clone`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        new_name: newName,
+        clone_data_volumes: projectCloneState.cloneDataVolumes,
+        create_floating_ip: projectCloneState.createFloatingIp,
+        power_on: projectCloneState.powerOn,
+        keep_metadata: projectCloneState.keepMetadata,
+      }),
+    });
+    const json = await resp.json();
+    if (json.api_issue) recordApiIssue(json.api_issue);
+    else recordApiSuccess('OpenStack');
+    if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
+    const result = json.result || {};
+    const warningText = (result.warnings || []).filter(Boolean).join(' ');
+    projectCloneState.tone = warningText ? 'warn' : 'info';
+    projectCloneState.message = `Clone created as ${result.server_name || newName} (${result.server_id || 'server id unavailable'}).`
+      + `${result.floating_ip_id ? ` Floating IP ${result.floating_ip_id} was allocated.` : projectCloneState.createFloatingIp ? ' No floating IP was allocated.' : ' Floating IP creation was skipped.'}`
+      + `${warningText ? ` ${warningText}` : ''}`;
+    onLog?.({
+      node: '-',
+      message: `Clone created for ${instance.name || instance.id}: ${result.server_name || newName} (${result.server_id || 'unknown server id'}).`,
+      color: 'success',
+    });
+    if (selectedProjectId) {
+      loadProjectInventory(selectedProjectId, 'instances', true, '');
+      if (activeProjectView === 'networking') ensureProjectNetworkingFamiliesLoaded(selectedProjectId, true);
+    }
+  } catch (err) {
+    projectCloneState.tone = 'error';
+    projectCloneState.message = `Clone failed: ${err}`;
+    onLog?.({ node: '-', message: `Clone failed for ${instance.name || instance.id}: ${err}`, color: 'error' });
+  } finally {
+    projectCloneState.submitting = false;
+    renderProjectCloneOverlay();
+  }
 }
 
 function renderProjectCloneOverlay() {
@@ -897,8 +927,8 @@ function renderProjectCloneOverlay() {
         ${projectCloneState.message ? `<div class="${statusTone}" style="padding:10px 12px">${esc(projectCloneState.message)}</div>` : ''}
 
         <div class="session-actions" style="justify-content:flex-end">
-          <button class="btn" onclick="closeProjectClonePlanner()">Close</button>
-          <button class="btn primary" onclick="submitProjectClonePlanner()">Review Clone Plan</button>
+          <button class="btn" onclick="closeProjectClonePlanner()" ${projectCloneState.submitting ? 'disabled' : ''}>Close</button>
+          <button class="btn primary" onclick="submitProjectClonePlanner()" ${projectCloneState.submitting ? 'disabled' : ''}>${projectCloneState.submitting ? 'Launching Clone…' : 'Launch Clone'}</button>
         </div>
       </div>
     </div>

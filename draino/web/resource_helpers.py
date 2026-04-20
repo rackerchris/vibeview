@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import time
+from urllib.parse import urlparse
 
 from ..operations import k8s_ops, openstack_ops
 
@@ -2778,6 +2780,382 @@ def retype_volume(
             }
 
     raise RuntimeError("Cinder retype is not available from the current SDK connection")
+
+
+def _server_volume_ids(server) -> list[str]:
+    data = _obj_dict(server)
+    raw = (
+        getattr(server, "attached_volumes", None)
+        or data.get("attached_volumes")
+        or data.get("os-extended-volumes:volumes_attached")
+        or data.get("os_extended_volumes:volumes_attached")
+        or []
+    )
+    result: list[str] = []
+    for item in raw:
+        if isinstance(item, dict):
+            volume_id = str(item.get("id") or item.get("volume_id") or "")
+        else:
+            volume_id = str(getattr(item, "id", None) or getattr(item, "volume_id", None) or "")
+        if volume_id:
+            result.append(volume_id)
+    return result
+
+
+def _volume_attachment_for_server(volume, server_id: str) -> dict:
+    data = _obj_dict(volume)
+    for item in list(getattr(volume, "attachments", None) or data.get("attachments") or []):
+        if str(item.get("server_id") or item.get("serverId") or item.get("instance")) == server_id:
+            return item
+    return {}
+
+
+def _volume_device_rank(device_name: str) -> tuple[int, str]:
+    text = str(device_name or "").lower()
+    if text.endswith("vda") or text.endswith("sda"):
+        return (0, text)
+    if text.endswith("vdb") or text.endswith("sdb"):
+        return (1, text)
+    return (5, text)
+
+
+def _wait_for_status(fetch_fn, status_fn, ok_statuses: set[str], error_statuses: set[str], timeout: int = 900, interval: float = 2.0):
+    deadline = time.time() + max(1, int(timeout))
+    last = None
+    while time.time() < deadline:
+        last = fetch_fn()
+        status = str(status_fn(last) or "").lower()
+        if status in ok_statuses:
+            return last
+        if status in error_statuses:
+            raise RuntimeError(f"Resource entered failure state: {status}")
+        time.sleep(interval)
+    raise RuntimeError(f"Timed out waiting for resource status ({', '.join(sorted(ok_statuses))})")
+
+
+def _compute_create_server(conn, payload: dict) -> dict:
+    compute = getattr(conn, "compute", None)
+    fn = getattr(compute, "create_server", None) if compute is not None else None
+    if callable(fn):
+        attrs = {**(payload.get("server", {}) or {})}
+        if "flavorRef" in attrs:
+            attrs["flavor_id"] = attrs.pop("flavorRef")
+        if "imageRef" in attrs:
+            attrs["image_id"] = attrs.pop("imageRef")
+        server = fn(**attrs)
+        data = _obj_dict(server)
+        return {"id": getattr(server, "id", None) or data.get("id") or ""}
+    session = getattr(conn, "session", None)
+    endpoint_for = getattr(conn, "endpoint_for", None)
+    if session is None or not callable(endpoint_for):
+        raise RuntimeError("Nova server creation is not available from the current SDK connection")
+    endpoint = str(endpoint_for("compute") or "").rstrip("/")
+    response = session.post(f"{endpoint}/servers", json=payload, microversion=None)
+    if hasattr(response, "raise_for_status"):
+        response.raise_for_status()
+    body = response.json() if hasattr(response, "json") else {}
+    return body.get("server") or {}
+
+
+def _compute_create_server_image(conn, server_id: str, image_name: str) -> str:
+    compute = getattr(conn, "compute", None)
+    fn = getattr(compute, "create_server_image", None) if compute is not None else None
+    if callable(fn):
+        result = fn(server_id, image_name)
+        if isinstance(result, str):
+            return result
+        data = _obj_dict(result)
+        image_id = getattr(result, "id", None) or data.get("id") or data.get("image_id") or ""
+        if image_id:
+            return image_id
+    session = getattr(conn, "session", None)
+    endpoint_for = getattr(conn, "endpoint_for", None)
+    if session is None or not callable(endpoint_for):
+        raise RuntimeError("Nova snapshot creation is not available from the current SDK connection")
+    endpoint = str(endpoint_for("compute") or "").rstrip("/")
+    response = session.post(
+        f"{endpoint}/servers/{server_id}/action",
+        json={"createImage": {"name": image_name}},
+        microversion=None,
+    )
+    if hasattr(response, "raise_for_status"):
+        response.raise_for_status()
+    location = ""
+    headers = getattr(response, "headers", {}) or {}
+    for key in ("location", "Location", "content-location", "Content-Location"):
+        if headers.get(key):
+            location = str(headers.get(key))
+            break
+    if location:
+        path = urlparse(location).path.rstrip("/")
+        if path:
+            return path.split("/")[-1]
+    raise RuntimeError("Snapshot image id was not returned by Nova")
+
+
+def _create_port_clone(conn, source_port, name_prefix: str, project_id: str) -> dict:
+    source_data = _obj_dict(source_port)
+    attrs = {
+        "name": f"{name_prefix}-{getattr(source_port, 'name', None) or source_data.get('name') or 'port'}".strip("-"),
+        "network_id": getattr(source_port, "network_id", None) or source_data.get("network_id") or "",
+        "project_id": project_id,
+    }
+    security_groups = _port_security_groups(source_port)
+    if security_groups:
+        attrs["security_group_ids"] = security_groups
+    try:
+        port = conn.network.create_port(**attrs)
+    except TypeError:
+        if "security_group_ids" in attrs:
+            attrs["security_groups"] = attrs.pop("security_group_ids")
+        port = conn.network.create_port(**attrs)
+    port_data = _obj_dict(port)
+    return {
+        "id": getattr(port, "id", None) or port_data.get("id") or "",
+        "name": getattr(port, "name", None) or port_data.get("name") or "",
+        "network_id": attrs["network_id"],
+        "security_group_ids": security_groups,
+    }
+
+
+def clone_instance(
+    instance_id: str,
+    *,
+    new_name: str,
+    clone_data_volumes: bool = True,
+    create_floating_ip: bool = True,
+    power_on: bool = True,
+    keep_metadata: bool = True,
+    auth: openstack_ops.OpenStackAuth | None = None,
+) -> dict:
+    conn = openstack_ops._conn(auth=auth)
+    volume_proxy = getattr(conn, "block_storage", None) or getattr(conn, "volume", None)
+    source = conn.compute.get_server(instance_id)
+    if source is None:
+        raise ValueError("Source instance was not found")
+    source_data = _obj_dict(source)
+    requested_name = str(new_name or "").strip()
+    if not requested_name:
+        raise ValueError("new_name is required")
+    project_id = openstack_ops._server_project_id(source) or getattr(conn, "current_project_id", None) or ""
+    availability_zone = getattr(source, "availability_zone", None) or source_data.get("OS-EXT-AZ:availability_zone") or ""
+    key_name = getattr(source, "key_name", None) or source_data.get("key_name") or ""
+    metadata = dict(getattr(source, "metadata", None) or source_data.get("metadata") or {}) if keep_metadata else {}
+    flavor_ref = getattr(source, "flavor", None) or source_data.get("flavor") or {}
+    flavor = openstack_ops._resolve_flavor_data(conn, flavor_ref)
+    flavor_id = (
+        getattr(flavor_ref, "id", None)
+        or (flavor_ref.get("id") if isinstance(flavor_ref, dict) else None)
+        or flavor.get("id")
+        or ""
+    )
+    if not flavor_id:
+        raise RuntimeError("Unable to resolve source flavor id for clone")
+
+    source_ports = list(conn.network.ports(device_id=instance_id))
+    if not source_ports:
+        raise RuntimeError("Source instance has no Neutron ports to clone")
+
+    created_ports: list[str] = []
+    created_volumes: list[str] = []
+    created_floating_ip_id = ""
+    created_server_id = ""
+    snapshot_image_id = ""
+    warnings: list[str] = []
+
+    try:
+        cloned_ports = [_create_port_clone(conn, port, requested_name, project_id) for port in source_ports]
+        created_ports = [item["id"] for item in cloned_ports if item.get("id")]
+
+        source_floating_network_id = ""
+        for port in source_ports:
+            port_id = getattr(port, "id", None) or _obj_dict(port).get("id") or ""
+            if not port_id:
+                continue
+            for floating_ip in conn.network.ips(port_id=port_id):
+                ip_data = _obj_dict(floating_ip)
+                source_floating_network_id = getattr(floating_ip, "floating_network_id", None) or ip_data.get("floating_network_id") or ""
+                if source_floating_network_id:
+                    break
+            if source_floating_network_id:
+                break
+
+        volume_ids = _server_volume_ids(source)
+        cloned_volume_records: list[dict] = []
+        for volume_id in volume_ids:
+            if volume_proxy is None:
+                raise RuntimeError("Block storage is not available from the current SDK connection")
+            volume = volume_proxy.get_volume(volume_id)
+            if volume is None:
+                continue
+            attachment = _volume_attachment_for_server(volume, instance_id)
+            device_name = str(attachment.get("device") or "")
+            is_root = not getattr(source, "image", None) and _volume_device_rank(device_name)[0] == 0
+            if not is_root and not clone_data_volumes:
+                continue
+            source_volume_data = _obj_dict(volume)
+            clone_name = f"{requested_name}-{getattr(volume, 'name', None) or source_volume_data.get('name') or volume_id}"
+            cloned = volume_proxy.create_volume(
+                name=clone_name,
+                source_volid=volume_id,
+                description=f"Cloned from {getattr(source, 'name', None) or instance_id}",
+            )
+            cloned_id = getattr(cloned, "id", None) or _obj_dict(cloned).get("id") or ""
+            if not cloned_id:
+                raise RuntimeError(f"Failed to create cloned volume for {volume_id}")
+            created_volumes.append(cloned_id)
+            cloned_ready = _wait_for_status(
+                lambda volume_id=cloned_id: volume_proxy.get_volume(volume_id),
+                lambda item: getattr(item, "status", None) or _obj_dict(item).get("status"),
+                {"available", "in-use"},
+                {"error", "error_restoring", "error_extending"},
+                timeout=1800,
+            )
+            cloned_volume_records.append({
+                "id": cloned_id,
+                "source_id": volume_id,
+                "device_name": device_name,
+                "is_root": is_root,
+                "name": getattr(cloned_ready, "name", None) or _obj_dict(cloned_ready).get("name") or clone_name,
+            })
+
+        block_device_mapping_v2: list[dict] = []
+        image_ref = ""
+        if not getattr(source, "image", None):
+            root_volume = next((item for item in sorted(cloned_volume_records, key=lambda item: _volume_device_rank(item.get("device_name", ""))) if item.get("is_root")), None)
+            if root_volume is None:
+                raise RuntimeError("Unable to identify the root volume for a volume-backed clone")
+            block_device_mapping_v2.append({
+                "boot_index": "0",
+                "uuid": root_volume["id"],
+                "source_type": "volume",
+                "destination_type": "volume",
+                "delete_on_termination": False,
+                "device_name": root_volume.get("device_name") or None,
+            })
+            for item in sorted((record for record in cloned_volume_records if record["id"] != root_volume["id"]), key=lambda row: _volume_device_rank(row.get("device_name", ""))):
+                block_device_mapping_v2.append({
+                    "boot_index": "-1",
+                    "uuid": item["id"],
+                    "source_type": "volume",
+                    "destination_type": "volume",
+                    "delete_on_termination": False,
+                    "device_name": item.get("device_name") or None,
+                })
+        else:
+            snapshot_image_id = _compute_create_server_image(conn, instance_id, f"{requested_name}-snapshot")
+            image = _wait_for_status(
+                lambda: conn.image.get_image(snapshot_image_id),
+                lambda item: getattr(item, "status", None) or _obj_dict(item).get("status"),
+                {"active"},
+                {"killed", "deleted", "error", "deactivated"},
+                timeout=1800,
+            )
+            image_ref = getattr(image, "id", None) or _obj_dict(image).get("id") or snapshot_image_id
+            for item in sorted(cloned_volume_records, key=lambda row: _volume_device_rank(row.get("device_name", ""))):
+                block_device_mapping_v2.append({
+                    "boot_index": "-1",
+                    "uuid": item["id"],
+                    "source_type": "volume",
+                    "destination_type": "volume",
+                    "delete_on_termination": False,
+                    "device_name": item.get("device_name") or None,
+                })
+
+        server_payload = {
+            "server": {
+                "name": requested_name,
+                "flavorRef": flavor_id,
+                "networks": [{"port": item["id"]} for item in cloned_ports],
+            }
+        }
+        if image_ref:
+            server_payload["server"]["imageRef"] = image_ref
+        if block_device_mapping_v2:
+            server_payload["server"]["block_device_mapping_v2"] = block_device_mapping_v2
+        if metadata:
+            server_payload["server"]["metadata"] = metadata
+        if availability_zone:
+            server_payload["server"]["availability_zone"] = availability_zone
+        if key_name:
+            server_payload["server"]["key_name"] = key_name
+
+        created_server = _compute_create_server(conn, server_payload)
+        created_server_id = str(created_server.get("id") or "")
+        if not created_server_id:
+            raise RuntimeError("Nova did not return a cloned server id")
+
+        server_ready = _wait_for_status(
+            lambda: conn.compute.get_server(created_server_id),
+            lambda item: getattr(item, "status", None) or _obj_dict(item).get("status"),
+            {"active", "shutoff"},
+            {"error"},
+            timeout=1800,
+        )
+
+        if create_floating_ip:
+            if source_floating_network_id:
+                created_fip = conn.network.create_ip(
+                    floating_network_id=source_floating_network_id,
+                    port_id=cloned_ports[0]["id"],
+                    project_id=project_id,
+                )
+                created_floating_ip_id = getattr(created_fip, "id", None) or _obj_dict(created_fip).get("id") or ""
+            else:
+                warnings.append("No source floating IP network could be inferred, so no new floating IP was created.")
+
+        if not power_on and str(getattr(server_ready, "status", None) or _obj_dict(server_ready).get("status") or "").upper() != "SHUTOFF":
+            conn.compute.stop_server(created_server_id)
+            _wait_for_status(
+                lambda: conn.compute.get_server(created_server_id),
+                lambda item: getattr(item, "status", None) or _obj_dict(item).get("status"),
+                {"shutoff"},
+                {"error"},
+                timeout=600,
+            )
+
+        return {
+            "source_instance_id": instance_id,
+            "server_id": created_server_id,
+            "server_name": requested_name,
+            "status": "created",
+            "flavor_id": flavor_id,
+            "ports": created_ports,
+            "volumes": created_volumes,
+            "snapshot_image_id": snapshot_image_id or None,
+            "floating_ip_id": created_floating_ip_id or None,
+            "floating_ip_requested": bool(create_floating_ip),
+            "power_on": bool(power_on),
+            "warnings": warnings,
+        }
+    except Exception:
+        if created_floating_ip_id:
+            try:
+                conn.network.delete_ip(created_floating_ip_id, ignore_missing=True)
+            except Exception:
+                pass
+        if created_server_id:
+            try:
+                conn.compute.delete_server(created_server_id, ignore_missing=True)
+            except Exception:
+                pass
+        for volume_id in reversed(created_volumes):
+            try:
+                if volume_proxy is not None:
+                    volume_proxy.delete_volume(volume_id, ignore_missing=True)
+            except Exception:
+                pass
+        if snapshot_image_id:
+            try:
+                conn.image.delete_image(snapshot_image_id, ignore_missing=True)
+            except Exception:
+                pass
+        for port_id in reversed(created_ports):
+            try:
+                conn.network.delete_port(port_id, ignore_missing=True)
+            except Exception:
+                pass
+        raise
 
 
 def get_swift_containers(auth: openstack_ops.OpenStackAuth | None) -> list[dict]:

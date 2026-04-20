@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
+from functools import partial
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -14,6 +15,7 @@ from ...operations import k8s_ops, openstack_ops
 from ..assistant_service import answer_assistant_query, assistant_provider_status, stream_assistant_query, validate_assistant_provider
 from .api_issues import build_api_issue
 from ..resource_helpers import (
+    clone_instance,
     get_floating_ips,
     get_port_detail,
     get_ports,
@@ -433,6 +435,39 @@ async def api_volume_retype(volume_id: str, request: Request):
             "result": None,
             "error": str(exc),
             "api_issue": build_api_issue("Cinder", f"POST /v3/volumes/{volume_id}/action os-retype", exc),
+        }
+
+
+@router.post("/api/instances/{instance_id}/clone")
+async def api_instance_clone(instance_id: str, request: Request):
+    session = _require_session_record()(request)
+    payload = await request.json()
+    new_name = str(payload.get("new_name") or "").strip()
+    clone_data_volumes = bool(payload.get("clone_data_volumes", True))
+    create_floating_ip = bool(payload.get("create_floating_ip", True))
+    power_on = bool(payload.get("power_on", True))
+    keep_metadata = bool(payload.get("keep_metadata", True))
+    loop = asyncio.get_running_loop()
+    try:
+        data = await loop.run_in_executor(
+            None,
+            partial(
+                clone_instance,
+                instance_id,
+                new_name=new_name,
+                clone_data_volumes=clone_data_volumes,
+                create_floating_ip=create_floating_ip,
+                power_on=power_on,
+                keep_metadata=keep_metadata,
+                auth=session.server.openstack_auth,
+            ),
+        )
+        return {"result": data, "error": None, "api_issue": None}
+    except Exception as exc:
+        return {
+            "result": None,
+            "error": str(exc),
+            "api_issue": build_api_issue("OpenStack", f"POST /api/instances/{instance_id}/clone", exc),
         }
 
 

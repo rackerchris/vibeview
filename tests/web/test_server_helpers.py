@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from draino.models import NodeState
+from draino.web import resource_helpers
 from draino.web import server as web_server
 
 
@@ -261,6 +262,141 @@ def test_retype_volume_uses_volume_proxy_when_available(monkeypatch):
         "status": "requested",
     }
     assert calls == [("vol-1", "gold-backend-b", "on-demand")]
+
+
+def test_clone_instance_creates_ports_volumes_server_and_floating_ip(monkeypatch):
+    created_server = {}
+    created_ports = []
+    created_volumes = []
+    created_ips = []
+
+    class FakeServer:
+        id = "vm-1"
+        name = "vm-1"
+        status = "ACTIVE"
+        image = None
+        flavor = {"id": "flavor-1"}
+        availability_zone = "nova"
+        key_name = "default-key"
+        metadata = {"role": "api"}
+        attached_volumes = [{"id": "root-vol"}, {"id": "data-vol"}]
+
+        def to_dict(self):
+            return {"project_id": "proj-1", "OS-EXT-AZ:availability_zone": "nova", "metadata": {"role": "api"}}
+
+    class FakeSourcePort:
+        id = "port-1"
+        name = "primary"
+        network_id = "net-1"
+        security_group_ids = ["sg-1", "sg-2"]
+
+        def to_dict(self):
+            return {"network_id": "net-1", "security_group_ids": ["sg-1", "sg-2"]}
+
+    class FakeNetworkAPI:
+        @staticmethod
+        def ports(device_id=None):
+            assert device_id == "vm-1"
+            return [FakeSourcePort()]
+
+        @staticmethod
+        def create_port(**attrs):
+            created_ports.append(attrs)
+            return SimpleNamespace(id="clone-port-1", name=attrs.get("name", ""))
+
+        @staticmethod
+        def ips(port_id=None):
+            assert port_id == "port-1"
+            return [SimpleNamespace(id="fip-source", floating_network_id="ext-net-1", to_dict=lambda: {"floating_network_id": "ext-net-1"})]
+
+        @staticmethod
+        def create_ip(**attrs):
+            created_ips.append(attrs)
+            return SimpleNamespace(id="fip-clone-1")
+
+        @staticmethod
+        def delete_ip(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def delete_port(*args, **kwargs):
+            return None
+
+    class FakeBlockStorageAPI:
+        @staticmethod
+        def get_volume(volume_id):
+            if volume_id == "root-vol":
+                return SimpleNamespace(id="root-vol", name="root", status="available", attachments=[{"server_id": "vm-1", "device": "/dev/vda"}], to_dict=lambda: {"attachments": [{"server_id": "vm-1", "device": "/dev/vda"}]})
+            if volume_id == "data-vol":
+                return SimpleNamespace(id="data-vol", name="data", status="available", attachments=[{"server_id": "vm-1", "device": "/dev/vdb"}], to_dict=lambda: {"attachments": [{"server_id": "vm-1", "device": "/dev/vdb"}]})
+            if volume_id in {"clone-root-vol", "clone-data-vol"}:
+                return SimpleNamespace(id=volume_id, name=volume_id, status="available", attachments=[], to_dict=lambda: {"id": volume_id, "status": "available"})
+            raise AssertionError(f"unexpected volume lookup {volume_id}")
+
+        @staticmethod
+        def create_volume(**attrs):
+            created_volumes.append(attrs)
+            source_id = attrs["source_volid"]
+            clone_id = "clone-root-vol" if source_id == "root-vol" else "clone-data-vol"
+            return SimpleNamespace(id=clone_id, name=attrs.get("name", clone_id))
+
+        @staticmethod
+        def delete_volume(*args, **kwargs):
+            return None
+
+    class FakeComputeAPI:
+        @staticmethod
+        def get_server(server_id):
+            if server_id == "vm-1":
+                return FakeServer()
+            if server_id == "clone-vm-1":
+                return SimpleNamespace(id="clone-vm-1", status="ACTIVE", to_dict=lambda: {"id": "clone-vm-1", "status": "ACTIVE"})
+            raise AssertionError(f"unexpected server lookup {server_id}")
+
+        @staticmethod
+        def create_server(**attrs):
+            created_server.update(attrs)
+            return SimpleNamespace(id="clone-vm-1")
+
+        @staticmethod
+        def delete_server(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def stop_server(*args, **kwargs):
+            return None
+
+    class FakeConn:
+        compute = FakeComputeAPI()
+        network = FakeNetworkAPI()
+        block_storage = FakeBlockStorageAPI()
+        current_project_id = "proj-1"
+
+    monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
+    monkeypatch.setattr(web_server.openstack_ops, "_resolve_flavor_data", lambda conn, flavor_ref: {"id": "flavor-1"})
+
+    result = resource_helpers.clone_instance(
+        "vm-1",
+        new_name="vm-1-clone",
+        clone_data_volumes=True,
+        create_floating_ip=True,
+        power_on=True,
+        keep_metadata=True,
+        auth=None,
+    )
+
+    assert result["server_id"] == "clone-vm-1"
+    assert result["floating_ip_id"] == "fip-clone-1"
+    assert created_ports[0]["network_id"] == "net-1"
+    assert created_ports[0]["security_group_ids"] == ["sg-1", "sg-2"]
+    assert [item["source_volid"] for item in created_volumes] == ["root-vol", "data-vol"]
+    assert created_server["name"] == "vm-1-clone"
+    assert created_server["flavor_id"] == "flavor-1"
+    assert created_server["networks"] == [{"port": "clone-port-1"}]
+    assert created_server["block_device_mapping_v2"][0]["uuid"] == "clone-root-vol"
+    assert created_server["block_device_mapping_v2"][1]["uuid"] == "clone-data-vol"
+    assert created_ips[0]["floating_network_id"] == "ext-net-1"
+    assert created_ips[0]["port_id"] == "clone-port-1"
 
 
 def test_get_network_detail_includes_metadata_port_for_matching_subnet(monkeypatch):
