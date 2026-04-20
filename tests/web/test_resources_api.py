@@ -1843,6 +1843,40 @@ def test_assistant_service_resolves_environment_metric_choice_to_emptiest(monkey
     assert "`1`" in result["answer"]
 
 
+def test_assistant_service_answers_top_n_busiest_hypervisors(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for top-n hypervisor summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 11, "compute_status": "up"},
+            "cmp-2": {"vm_count": 27, "compute_status": "up"},
+            "cmp-3": {"vm_count": 6, "compute_status": "up"},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("top 2 busiest compute nodes", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "hypervisor_metric_top_n"
+    assert "Top 2 hypervisors by VM load" in result["answer"]
+    assert "- `cmp-2`: `27`" in result["answer"]
+    assert "- `cmp-1`: `11`" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
 def test_fallback_parser_leaves_networking_diagnosis_question_unknown():
     parsed = assistant_service._parse_query_fallback("What should I look at first if networking feels unhealthy for this project?")
 

@@ -183,6 +183,78 @@ def _format_metric_capacity(metric: str, item: dict[str, Any]) -> str:
     return ""
 
 
+HYPERVISOR_METRIC_SUMMARIES: dict[str, dict[str, Any]] = {
+    "busiest_hypervisor_summary": {
+        "metric": "running_vms",
+        "operator": "max",
+        "answer_label": "VM load",
+        "answer_verb": "highest",
+        "answer_suffix": "running VMs",
+        "entity_label": "hypervisor load",
+        "findings_label": "Top hypervisors by running VMs",
+        "collector": "summary",
+        "choice_label": "VM load",
+        "choice_subtext": "Which hypervisor is running the most VMs",
+    },
+    "emptiest_hypervisor_summary": {
+        "metric": "running_vms",
+        "operator": "min",
+        "answer_label": "VM load",
+        "answer_verb": "lowest",
+        "answer_suffix": "running VMs",
+        "entity_label": "hypervisor load",
+        "findings_label": "Least-loaded hypervisors by running VMs",
+        "collector": "summary",
+        "choice_label": "Fewest VMs",
+        "choice_subtext": "Which hypervisor is running the fewest VMs",
+    },
+    "highest_ram_hypervisor_summary": {
+        "metric": "memory_mb_used",
+        "operator": "max",
+        "answer_label": "RAM usage",
+        "answer_verb": "highest",
+        "answer_suffix": "RAM in use",
+        "entity_label": "hypervisor RAM usage",
+        "findings_label": "Top hypervisors by RAM in use",
+        "include_suffix_in_value": False,
+        "choice_label": "RAM usage",
+        "choice_subtext": "Which hypervisor is using the most memory",
+    },
+    "highest_cpu_hypervisor_summary": {
+        "metric": "vcpus_used",
+        "operator": "max",
+        "answer_label": "CPU usage",
+        "answer_verb": "highest",
+        "answer_suffix": "vCPUs in use",
+        "entity_label": "hypervisor CPU usage",
+        "findings_label": "Top hypervisors by vCPU use",
+        "include_suffix_in_value": True,
+        "choice_label": "CPU usage",
+        "choice_subtext": "Which hypervisor is using the most vCPUs",
+    },
+    "highest_disk_hypervisor_summary": {
+        "metric": "local_disk_gb_used",
+        "operator": "max",
+        "answer_label": "local disk usage",
+        "answer_verb": "highest",
+        "answer_suffix": "local disk in use",
+        "entity_label": "hypervisor disk usage",
+        "findings_label": "Top hypervisors by local disk use",
+        "include_suffix_in_value": True,
+        "choice_label": "Disk usage",
+        "choice_subtext": "Which hypervisor is using the most local disk",
+    },
+}
+
+HYPERVISOR_METRIC_KEY_TO_INTENT = {
+    "hypervisor_load": "busiest_hypervisor_summary",
+    "hypervisor_empty": "emptiest_hypervisor_summary",
+    "hypervisor_ram": "highest_ram_hypervisor_summary",
+    "hypervisor_cpu": "highest_cpu_hypervisor_summary",
+    "hypervisor_disk": "highest_disk_hypervisor_summary",
+}
+
+
 def answer_hypervisor_metric_ranking(
     metric: str,
     *,
@@ -390,84 +462,125 @@ def answer_empty_compute_nodes_summary(openstack_auth=None, k8s_auth=None) -> di
     }
 
 
-def answer_busiest_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
+def answer_hypervisor_metric_summary(intent: str, openstack_auth=None, k8s_auth=None) -> dict[str, Any] | None:
+    config = HYPERVISOR_METRIC_SUMMARIES.get(str(intent or "").strip())
+    if config is None:
+        return None
     return answer_hypervisor_metric_ranking(
-        "running_vms",
+        config["metric"],
         openstack_auth=openstack_auth,
         k8s_auth=k8s_auth,
-        intent="busiest_hypervisor_summary",
-        operator="max",
-        answer_label="VM load",
-        answer_verb="highest",
-        answer_suffix="running VMs",
-        entity_label="hypervisor load",
-        findings_label="Top hypervisors by running VMs",
-        collector="summary",
+        intent=intent,
+        operator=config.get("operator", "max"),
+        answer_label=config["answer_label"],
+        answer_verb=config.get("answer_verb", "highest"),
+        answer_suffix=config["answer_suffix"],
+        entity_label=config["entity_label"],
+        findings_label=config["findings_label"],
+        collector=config.get("collector", "detail"),
+        include_suffix_in_value=bool(config.get("include_suffix_in_value", False)),
     )
+
+
+def answer_hypervisor_metric_top_n(
+    metric_key: str,
+    limit: int,
+    openstack_auth=None,
+    k8s_auth=None,
+) -> dict[str, Any] | None:
+    summary_intent = HYPERVISOR_METRIC_KEY_TO_INTENT.get(str(metric_key or "").strip())
+    if not summary_intent:
+        return None
+    config = HYPERVISOR_METRIC_SUMMARIES.get(summary_intent)
+    if config is None:
+        return None
+    metric = config["metric"]
+    collector = config.get("collector", "detail")
+    if collector == "summary":
+        facts, errors = _collect_hypervisor_vm_facts(openstack_auth=openstack_auth, k8s_auth=k8s_auth)
+    else:
+        facts, errors = _collect_hypervisor_detail_facts(openstack_auth=openstack_auth, k8s_auth=k8s_auth)
+    reverse = config.get("operator", "max") != "min"
+    ranked = sorted(
+        facts,
+        key=lambda item: (int(item.get(metric) or 0), str(item.get("name") or "")),
+        reverse=reverse,
+    )
+    if not ranked:
+        return None
+    top_n = max(1, min(int(limit or 3), 10))
+    selected = ranked[:top_n]
+    title = f"Top {top_n} hypervisors by {config['answer_label']}" if reverse else f"Bottom {top_n} hypervisors by {config['answer_label']}"
+    lines = [title, ""]
+    for item in selected:
+        value = _format_metric_value(metric, item)
+        if config.get("include_suffix_in_value", False):
+            value = f"{value} {config['answer_suffix']}"
+        lines.append(f"- `{item.get('name')}`: `{value}`")
+    findings = [
+        f"{config['findings_label']}\n" + "\n".join(
+            f"- {item.get('name')} ({_format_metric_value(metric, item)})" for item in selected
+        )
+    ]
+    if errors:
+        findings.append(errors[0])
+    return {
+        "intent": "hypervisor_metric_top_n",
+        "answer": "\n".join(lines),
+        "confidence": 0.86 if not errors else 0.66,
+        "entities": [{"kind": "environment", "id": metric_key, "label": config["entity_label"]}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings,
+        "scope": {
+            "metric_key": metric_key,
+            "metric": metric,
+            "count": top_n,
+        },
+        "answer_source": "local",
+        "mode": "grounded_environment_summary",
+        "provenance": "Grounded Kubernetes and OpenStack data",
+    }
+
+
+def hypervisor_metric_choices() -> list[dict[str, Any]]:
+    order = [
+        "busiest_hypervisor_summary",
+        "highest_ram_hypervisor_summary",
+        "highest_cpu_hypervisor_summary",
+        "highest_disk_hypervisor_summary",
+        "emptiest_hypervisor_summary",
+    ]
+    return [
+        {
+            "kind": "environment_metric",
+            "id": intent,
+            "label": HYPERVISOR_METRIC_SUMMARIES[intent]["choice_label"],
+            "subtext": HYPERVISOR_METRIC_SUMMARIES[intent]["choice_subtext"],
+        }
+        for intent in order
+        if intent in HYPERVISOR_METRIC_SUMMARIES
+    ]
+
+
+def answer_busiest_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
+    return answer_hypervisor_metric_summary("busiest_hypervisor_summary", openstack_auth, k8s_auth) or {}
 
 
 def answer_highest_ram_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
-    return answer_hypervisor_metric_ranking(
-        "memory_mb_used",
-        openstack_auth=openstack_auth,
-        k8s_auth=k8s_auth,
-        intent="highest_ram_hypervisor_summary",
-        operator="max",
-        answer_label="RAM usage",
-        answer_verb="highest",
-        answer_suffix="RAM in use",
-        entity_label="hypervisor RAM usage",
-        findings_label="Top hypervisors by RAM in use",
-        include_suffix_in_value=False,
-    )
+    return answer_hypervisor_metric_summary("highest_ram_hypervisor_summary", openstack_auth, k8s_auth) or {}
 
 
 def answer_highest_cpu_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
-    return answer_hypervisor_metric_ranking(
-        "vcpus_used",
-        openstack_auth=openstack_auth,
-        k8s_auth=k8s_auth,
-        intent="highest_cpu_hypervisor_summary",
-        operator="max",
-        answer_label="CPU usage",
-        answer_verb="highest",
-        answer_suffix="vCPUs in use",
-        entity_label="hypervisor CPU usage",
-        findings_label="Top hypervisors by vCPU use",
-        include_suffix_in_value=True,
-    )
+    return answer_hypervisor_metric_summary("highest_cpu_hypervisor_summary", openstack_auth, k8s_auth) or {}
 
 
 def answer_highest_disk_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
-    return answer_hypervisor_metric_ranking(
-        "local_disk_gb_used",
-        openstack_auth=openstack_auth,
-        k8s_auth=k8s_auth,
-        intent="highest_disk_hypervisor_summary",
-        operator="max",
-        answer_label="local disk usage",
-        answer_verb="highest",
-        answer_suffix="local disk in use",
-        entity_label="hypervisor disk usage",
-        findings_label="Top hypervisors by local disk use",
-        include_suffix_in_value=True,
-    )
+    return answer_hypervisor_metric_summary("highest_disk_hypervisor_summary", openstack_auth, k8s_auth) or {}
 
 
 def answer_emptiest_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> dict[str, Any]:
-    return answer_hypervisor_metric_ranking(
-        "running_vms",
-        openstack_auth=openstack_auth,
-        k8s_auth=k8s_auth,
-        intent="emptiest_hypervisor_summary",
-        operator="min",
-        answer_label="VM load",
-        answer_verb="lowest",
-        answer_suffix="running VMs",
-        entity_label="hypervisor load",
-        findings_label="Least-loaded hypervisors by running VMs",
-        collector="summary",
-    )
+    return answer_hypervisor_metric_summary("emptiest_hypervisor_summary", openstack_auth, k8s_auth) or {}
 
 
 ENVIRONMENT_SUMMARY_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
@@ -475,20 +588,19 @@ ENVIRONMENT_SUMMARY_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
     "missing_node_agent_summary": answer_missing_node_agent_summary,
     "reboot_needed_summary": answer_reboot_needed_summary,
     "empty_compute_nodes_summary": answer_empty_compute_nodes_summary,
-    "busiest_hypervisor_summary": answer_busiest_hypervisor_summary,
-    "emptiest_hypervisor_summary": answer_emptiest_hypervisor_summary,
-    "highest_ram_hypervisor_summary": answer_highest_ram_hypervisor_summary,
-    "highest_cpu_hypervisor_summary": answer_highest_cpu_hypervisor_summary,
-    "highest_disk_hypervisor_summary": answer_highest_disk_hypervisor_summary,
+    **{intent: answer_hypervisor_metric_summary for intent in HYPERVISOR_METRIC_SUMMARIES},
 }
 
 ENVIRONMENT_SUMMARY_INTENTS = frozenset(ENVIRONMENT_SUMMARY_HANDLERS.keys())
 
 
 def answer_environment_summary(intent: str, openstack_auth=None, k8s_auth=None) -> dict[str, Any] | None:
-    handler = ENVIRONMENT_SUMMARY_HANDLERS.get(str(intent or "").strip())
+    intent = str(intent or "").strip()
+    handler = ENVIRONMENT_SUMMARY_HANDLERS.get(intent)
     if handler is None:
         return None
+    if intent in HYPERVISOR_METRIC_SUMMARIES:
+        return handler(intent, openstack_auth=openstack_auth, k8s_auth=k8s_auth)
     if intent in {"kernel_version_summary", "missing_node_agent_summary"}:
         return handler(k8s_auth=k8s_auth)
     return handler(openstack_auth=openstack_auth, k8s_auth=k8s_auth)
