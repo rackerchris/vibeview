@@ -206,8 +206,12 @@ body {
   background: #f9fbfd;
 }
 .footer-search-shell .global-search-dropdown {
+  left: 0;
+  right: auto;
   top: auto;
   bottom: calc(100% + 10px);
+  width: min(430px, calc(100vw - 28px));
+  max-width: calc(100vw - 28px);
 }
 .assistant-panel {
   position: fixed;
