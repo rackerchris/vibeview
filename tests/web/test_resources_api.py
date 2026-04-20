@@ -3212,6 +3212,20 @@ def test_assistant_service_falls_back_locally_for_placement_trait_when_provider_
     assert "RTL8139" in result["answer"]
 
 
+def test_stream_assistant_query_falls_back_locally_for_placement_trait_when_provider_disabled(monkeypatch):
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: False)
+
+    events = list(assistant_service.stream_assistant_query("what is the HW_CPU_X86_INTEL_VMX trait?", auth=None))
+
+    assert events[0]["type"] == "meta"
+    assert events[-1]["type"] == "final"
+    result = events[-1]["result"]
+    assert result["intent"] == "platform_knowledge"
+    assert result["answer_source"] == "local"
+    assert "Placement" in result["answer"]
+    assert "HW_CPU_X86_INTEL_VMX" in result["answer"]
+
+
 def test_assistant_service_answers_platform_knowledge_for_router_definition(monkeypatch):
     monkeypatch.setattr(
         assistant_service,

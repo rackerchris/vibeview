@@ -2404,12 +2404,13 @@ def stream_assistant_query(
                 },
             }
             return
+        local_fallback = fallback_platform_knowledge_answer(text, knowledge_context) if knowledge_context else {}
         yield {
             "type": "final",
             "result": {
                 "intent": "platform_knowledge",
-                "answer": "I need the provider path enabled to answer that as general OpenStack knowledge.",
-                "confidence": 0.45,
+                "answer": str(local_fallback.get("answer") or "I need the provider path enabled to answer that as general OpenStack knowledge."),
+                "confidence": _safe_confidence(local_fallback.get("confidence"), 0.45),
                 "entities": [],
                 "actions": [],
                 "needs_clarification": False,
