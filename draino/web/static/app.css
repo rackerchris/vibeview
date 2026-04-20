@@ -2657,6 +2657,9 @@ body.no-hints .vmware-ref-card { display: none !important; }
   letter-spacing: 0.03em;
   margin-bottom: 4px;
 }
+.clone-workflow-resource-line + .clone-workflow-resource-line {
+  margin-top: 8px;
+}
 .clone-workflow-section {
   display: grid;
   gap: 6px;

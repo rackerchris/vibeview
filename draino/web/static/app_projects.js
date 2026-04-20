@@ -866,6 +866,10 @@ function projectCloneGroupedRows(status = projectCloneState.status) {
       description: 'Create any snapshot image needed, build the server, and wait for the final power state.',
       resourceKind: createdImages.length ? 'Snapshot / Server' : 'Server',
       resourceValue: serverResource || '—',
+      resourceLines: [
+        ...(createdImages.length ? [{ kind: 'Snapshot Image', value: createdImages.join(', ') }] : []),
+        ...((createdServers.length || status?.result?.server_id) ? [{ kind: 'Server', value: createdServers.join(', ') || status?.result?.server_id || '—' }] : []),
+      ],
       state: buildFailed ? 'failed' : (String(status?.state || '').toLowerCase() === 'completed' ? 'completed' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'running' : 'pending'),
       statusText: buildFailed ? 'Failed' : (String(status?.state || '').toLowerCase() === 'completed' ? 'Built' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'Building' : 'Pending'),
       error: buildFailed ? failureError : '',
@@ -957,8 +961,9 @@ function renderProjectCloneWorkflowPanel() {
                   ${row.error ? `<div class="clone-workflow-task-error">${esc(row.error)}</div>` : ''}
                 </td>
                 <td>
-                  <div class="clone-workflow-resource-kind">${esc(row.resourceKind)}</div>
-                  <div class="mono">${esc(row.resourceValue)}</div>
+                  ${Array.isArray(row.resourceLines) && row.resourceLines.length
+                    ? row.resourceLines.map((line) => `<div class="clone-workflow-resource-line"><div class="clone-workflow-resource-kind">${esc(line.kind)}</div><div class="mono">${esc(line.value)}</div></div>`).join('')
+                    : `<div class="clone-workflow-resource-kind">${esc(row.resourceKind)}</div><div class="mono">${esc(row.resourceValue)}</div>`}
                 </td>
                 <td><span class="status-pill ${escAttr(row.state === 'completed' ? 'done' : row.state === 'failed' ? 'failed' : row.state === 'running' ? 'running' : row.state === 'skipped' ? 'waiting' : 'waiting')}">${esc(row.statusText)}</span></td>
               </tr>`;
