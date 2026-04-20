@@ -191,9 +191,11 @@ def stream_platform_knowledge(query: str, provider: dict[str, Any]):
     yield from _provider_stream_text(provider, system_prompt, {"query": query})
 
 
-def answer_general_chat(query: str, provider: dict[str, Any]) -> dict[str, Any]:
+def answer_domain_chat(query: str, provider: dict[str, Any]) -> dict[str, Any]:
     system_prompt = (
-        "You are a concise assistant. "
+        "You are an infrastructure-focused assistant. "
+        "Only answer questions about cloud platforms, OpenStack, Kubernetes, Rackspace, Linux, Windows administration, GPUs, servers, networking, storage, virtualization, datacenter operations, or related platform engineering topics. "
+        "If the question is outside those domains, return JSON with a short refusal answer explaining that you are scoped to infrastructure/platform topics only. "
         "Return JSON with keys: answer, confidence. "
         "Format answer cleanly with short paragraphs, and use bullets only if they make the answer easier to scan. "
         "Avoid one long dense block of text."
@@ -204,9 +206,11 @@ def answer_general_chat(query: str, provider: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def stream_general_chat(query: str, provider: dict[str, Any]):
+def stream_domain_chat(query: str, provider: dict[str, Any]):
     system_prompt = (
-        "You are a concise assistant. "
+        "You are an infrastructure-focused assistant. "
+        "Only answer questions about cloud platforms, OpenStack, Kubernetes, Rackspace, Linux, Windows administration, GPUs, servers, networking, storage, virtualization, datacenter operations, or related platform engineering topics. "
+        "If the question is outside those domains, respond with a short refusal explaining that you are scoped to infrastructure/platform topics only. "
         "Respond as plain text only, not JSON. "
         "Format answer cleanly with short paragraphs, and use bullets only if they make the answer easier to scan. "
         "Avoid one long dense block of text."

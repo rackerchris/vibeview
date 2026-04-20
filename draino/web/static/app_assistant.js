@@ -306,6 +306,17 @@ function renderAssistantTimings(result) {
   return `<span>Timing: ${esc(String(timings.total_ms ?? '—'))} ms total • ${esc(String(timings.parse_ms ?? '—'))} ms parse • ${esc(String(timings.answer_ms ?? '—'))} ms app</span>`;
 }
 
+function renderAssistantConfidence(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return esc(String(value ?? '—'));
+  let label = 'Very Low';
+  if (numeric >= 0.9) label = 'Very High';
+  else if (numeric >= 0.75) label = 'High';
+  else if (numeric >= 0.5) label = 'Medium';
+  else if (numeric >= 0.25) label = 'Low';
+  return `${label} (${esc(numeric.toFixed(2))})`;
+}
+
 function formatAssistantInline(text) {
   return esc(String(text || ''))
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -465,7 +476,7 @@ function renderAssistantPanel() {
             ${String(result.answer || '').trim() ? `<div class="assistant-answer">${renderAssistantAnswer(result.answer || '')}</div>` : ''}
             <div class="assistant-meta">
               <span>Intent: ${esc(result.intent || 'unknown')}</span>
-              <span>Confidence: ${esc(String(result.confidence ?? '—'))}</span>
+              <span>Confidence: ${renderAssistantConfidence(result.confidence)}</span>
               <span>Parser: ${esc(result.parser_source || 'fallback')}</span>
               <span>Answered by: ${esc(result.answer_source || 'local')}</span>
               ${result.mode ? `<span>Mode: ${esc(result.mode)}</span>` : ''}

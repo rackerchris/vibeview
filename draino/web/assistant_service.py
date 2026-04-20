@@ -38,14 +38,16 @@ from .assistant_resource_answers import (
     answer_volume_posture,
 )
 from .assistant_cluster_answers import (
+    answer_cluster_health_overview,
     answer_control_plane_component_summary,
     answer_etcd_health_summary,
+    answer_mariadb_node_summary,
     answer_node_ready_summary,
 )
 from .assistant_synthesis import (
-    answer_general_chat,
+    answer_domain_chat,
     answer_platform_knowledge,
-    stream_general_chat,
+    stream_domain_chat,
     stream_platform_knowledge,
     synthesize_network_diagnosis,
 )
@@ -97,6 +99,8 @@ _RESOURCE_SUMMARY_INTENTS = {
     "floating_ip_lookup_by_fixed_ip",
     "floating_ip_idle_status",
     "etcd_health_summary",
+    "mariadb_node_summary",
+    "cluster_health_overview",
     "node_ready_summary",
     "control_plane_component_summary",
 }
@@ -197,6 +201,80 @@ _KNOWLEDGE_PHRASES = (
     "why is",
     "why does",
     "help me understand",
+)
+
+_DOMAIN_CHAT_TERMS = (
+    "openstack",
+    "kubernetes",
+    "k8s",
+    "rackspace",
+    "cloud",
+    "linux",
+    "windows",
+    "gpu",
+    "gpus",
+    "cuda",
+    "vmware",
+    "hypervisor",
+    "virtualization",
+    "server",
+    "servers",
+    "datacenter",
+    "storage",
+    "networking",
+    "network",
+    "router",
+    "firewall",
+    "dns",
+    "load balancer",
+    "container",
+    "containers",
+    "docker",
+    "podman",
+    "kernel",
+    "filesystem",
+    "raid",
+    "backup",
+    "restore",
+    "incident",
+    "sre",
+    "observability",
+    "monitoring",
+    "grafana",
+    "prometheus",
+    "etcd",
+    "mariadb",
+    "mysql",
+    "apiserver",
+    "scheduler",
+    "controller manager",
+    "controller-manager",
+)
+
+_OUT_OF_SCOPE_TERMS = (
+    "sports",
+    "nfl",
+    "nba",
+    "mlb",
+    "nhl",
+    "soccer",
+    "football score",
+    "baseball",
+    "basketball",
+    "tennis",
+    "golf",
+    "movie",
+    "movies",
+    "celebrity",
+    "song",
+    "songs",
+    "recipe",
+    "travel",
+    "vacation",
+    "restaurant",
+    "stock price",
+    "bitcoin price",
+    "meaning of life",
 )
 
 
@@ -412,7 +490,11 @@ def _classify_unhandled_query(query: str, project_context: dict[str, str]) -> st
         and not operational_signals
     ):
         return "platform_knowledge"
-    return "general_chat"
+    if _contains_any(lower, _OUT_OF_SCOPE_TERMS):
+        return "out_of_scope"
+    if _contains_any(lower, _DOMAIN_CHAT_TERMS):
+        return "domain_chat"
+    return "out_of_scope"
 
 
 def _parse_query_fallback(query: str) -> dict[str, Any]:
@@ -463,6 +545,13 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "resource_name": "etcd",
             "needs_clarification": False,
         }
+    if _contains_any(lower, ("mariadb", "mysql")) and (signals["count"] or signals["alive"] or signals["status"]):
+        return {
+            "intent": "mariadb_node_summary",
+            "resource_kind": "cluster",
+            "resource_name": "mariadb",
+            "needs_clarification": False,
+        }
     if _contains_any(lower, ("nodes", "node")) and (signals["count"] or signals["alive"]) and _contains_any(lower, ("kubernetes", "cluster", "ready", "alive")):
         return {
             "intent": "node_ready_summary",
@@ -496,6 +585,15 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "intent": "control_plane_component_summary",
             "resource_kind": "cluster",
             "resource_name": "control_plane",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("cluster", "kubernetes", "k8s")) and (
+        signals["status"] or signals["alive"]
+    ) and _contains_any(lower, ("health", "healthy", "unhealthy", "status")):
+        return {
+            "intent": "cluster_health_overview",
+            "resource_kind": "cluster",
+            "resource_name": "cluster",
             "needs_clarification": False,
         }
     if sg_match and signals["security_lockdown"]:
@@ -1340,7 +1438,14 @@ def answer_assistant_query(
     fallback_preview = _parse_query_fallback(text)
     preview_intent = str(fallback_preview.get("intent") or "").strip().lower()
     task = _classify_unhandled_query(text, project_context)
-    if task != "platform_knowledge" and preview_intent not in {"etcd_health_summary", "node_ready_summary", "control_plane_component_summary"}:
+    if task != "platform_knowledge" and preview_intent not in {
+        "etcd_health_summary",
+        "mariadb_node_summary",
+        "cluster_health_overview",
+        "node_ready_summary",
+        "control_plane_component_summary",
+    }:
+        
         project_context = _default_project_context(auth, selected_project_id)
         if selected_project_name and not project_context.get("project_name"):
             project_context["project_name"] = selected_project_name
@@ -1379,8 +1484,10 @@ def answer_assistant_query(
         intent = "network_diagnosis"
     elif task == "platform_knowledge" and intent in {"unknown", "quota_usage", "quota_limit", "project_network_summary"}:
         intent = "platform_knowledge"
-    elif task == "general_chat" and intent == "unknown":
-        intent = "general_chat"
+    elif task == "domain_chat" and intent == "unknown":
+        intent = "domain_chat"
+    elif task == "out_of_scope" and intent == "unknown":
+        intent = "out_of_scope"
     if intent in _PROJECT_SCOPED_INTENTS:
         project_context, project_resolution = _project_resolution_response(
             intent,
@@ -1405,7 +1512,7 @@ def answer_assistant_query(
             return project_resolution
     if locked_kind and locked_label:
         resource_name = locked_label
-    if intent in {"network_diagnosis", "platform_knowledge", "general_chat"} or (parsed.get("needs_clarification") and intent == "unknown"):
+    if intent in {"network_diagnosis", "platform_knowledge", "domain_chat", "out_of_scope"} or (parsed.get("needs_clarification") and intent == "unknown"):
         if intent == "network_diagnosis":
             if not project_context.get("project_id"):
                 response = {
@@ -1474,24 +1581,36 @@ def answer_assistant_query(
                 "provenance": "General OpenStack knowledge",
                 "answer_source": "xerotier" if synthesized else "local",
             }
-        elif intent == "general_chat":
+        elif intent == "domain_chat":
             if assistant_provider_enabled():
                 try:
-                    synthesized = answer_general_chat(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
+                    synthesized = answer_domain_chat(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
                 except Exception:
                     synthesized = {}
             else:
                 synthesized = {}
             response = {
-                "intent": "general_chat",
+                "intent": "domain_chat",
                 "answer": synthesized.get("answer") or "I don’t have a provider answer for that right now.",
                 "confidence": _safe_confidence(synthesized.get("confidence"), 0.35),
                 "entities": [],
                 "actions": [],
                 "needs_clarification": False,
-                "mode": "general_chat",
-                "provenance": "General answer",
+                "mode": "domain_chat",
+                "provenance": "Infrastructure domain answer",
                 "answer_source": "xerotier" if synthesized else "local",
+            }
+        elif intent == "out_of_scope":
+            response = {
+                "intent": "out_of_scope",
+                "answer": "I’m scoped to infrastructure and platform topics such as OpenStack, Kubernetes, Rackspace, cloud operations, Linux, Windows administration, GPUs, networking, storage, and related systems work.",
+                "confidence": 0.95,
+                "entities": [],
+                "actions": [],
+                "needs_clarification": False,
+                "mode": "out_of_scope",
+                "provenance": "Scope policy",
+                "answer_source": "local",
             }
         else:
             response = {
@@ -1541,6 +1660,10 @@ def answer_assistant_query(
         )
     elif intent == "etcd_health_summary":
         response = answer_etcd_health_summary(k8s_auth)
+    elif intent == "mariadb_node_summary":
+        response = answer_mariadb_node_summary(k8s_auth)
+    elif intent == "cluster_health_overview":
+        response = answer_cluster_health_overview(k8s_auth)
     elif intent == "node_ready_summary":
         response = answer_node_ready_summary(k8s_auth)
     elif intent == "control_plane_component_summary":
@@ -1738,7 +1861,7 @@ def stream_assistant_query(
             },
         }
         return
-    if task == "general_chat" and assistant_provider_enabled():
+    if task == "domain_chat" and assistant_provider_enabled():
         parse_started = time.perf_counter()
         parsed = _parse_query_with_provider(text, {
             "selected_project_id": "",
@@ -1748,30 +1871,30 @@ def stream_assistant_query(
         parse_ms = round((time.perf_counter() - parse_started) * 1000, 1)
         if str(parsed.get("intent") or "unknown").strip().lower() == "unknown":
             meta = {
-                "intent": "general_chat",
+                "intent": "domain_chat",
                 "parser_source": parsed.get("parser_source", "fallback"),
                 "answer_source": "xerotier",
-                "mode": "general_chat",
-                "provenance": "General answer",
+                "mode": "domain_chat",
+                "provenance": "Infrastructure domain answer",
             }
             yield {"type": "meta", "meta": meta}
             chunks: list[str] = []
             answer_started = time.perf_counter()
             try:
-                for chunk in stream_general_chat(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS)):
+                for chunk in stream_domain_chat(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS)):
                     if not chunk:
                         continue
                     chunks.append(chunk)
                     yield {"type": "delta", "text": chunk}
                 answer = "".join(chunks).strip()
             except Exception:
-                fallback = answer_general_chat(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
+                fallback = answer_domain_chat(text, _assistant_provider_payload(timeout=_ASSISTANT_TIMEOUT_SECONDS))
                 answer = str(fallback.get("answer") or "").strip()
             answer_ms = round((time.perf_counter() - answer_started) * 1000, 1)
             yield {
                 "type": "final",
                 "result": {
-                    "intent": "general_chat",
+                    "intent": "domain_chat",
                     "answer": answer or "I don’t have a provider answer for that right now.",
                     "confidence": 0.35,
                     "entities": [],
@@ -1779,8 +1902,8 @@ def stream_assistant_query(
                     "needs_clarification": False,
                     "parser_source": parsed.get("parser_source", "fallback"),
                     "answer_source": "xerotier",
-                    "mode": "general_chat",
-                    "provenance": "General answer",
+                    "mode": "domain_chat",
+                    "provenance": "Infrastructure domain answer",
                     "provider_enabled": True,
                     "timings": {
                         "parse_ms": parse_ms,
@@ -1790,4 +1913,27 @@ def stream_assistant_query(
                 },
             }
             return
+    if task == "out_of_scope":
+        yield {
+            "type": "final",
+            "result": {
+                "intent": "out_of_scope",
+                "answer": "I’m scoped to infrastructure and platform topics such as OpenStack, Kubernetes, Rackspace, cloud operations, Linux, Windows administration, GPUs, networking, storage, and related systems work.",
+                "confidence": 0.95,
+                "entities": [],
+                "actions": [],
+                "needs_clarification": False,
+                "parser_source": "task-router",
+                "answer_source": "local",
+                "mode": "out_of_scope",
+                "provenance": "Scope policy",
+                "provider_enabled": assistant_provider_enabled(),
+                "timings": {
+                    "parse_ms": 0.0,
+                    "answer_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "total_ms": round((time.perf_counter() - started) * 1000, 1),
+                },
+            },
+        }
+        return
     yield {"type": "final", "result": answer_assistant_query(text, auth, k8s_auth, selected_project_id, selected_project_name, active_view, resolved_kind, resolved_id, resolved_label)}

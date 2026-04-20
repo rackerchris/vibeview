@@ -97,6 +97,68 @@ def answer_node_ready_summary(k8s_auth=None) -> dict[str, Any]:
     }
 
 
+def answer_mariadb_node_summary(k8s_auth=None) -> dict[str, Any]:
+    names = sorted(k8s_ops.get_mariadb_node_names(auth=k8s_auth))
+    total = len(names)
+    if not total:
+        answer = "I could not find any Kubernetes nodes currently hosting MariaDB cluster pods."
+        confidence = 0.55
+    else:
+        answer = f"There are {total} Kubernetes nodes currently hosting MariaDB cluster pods."
+        confidence = 0.9
+    return {
+        "intent": "mariadb_node_summary",
+        "answer": answer,
+        "confidence": confidence,
+        "entities": [{"kind": "cluster", "id": "mariadb", "label": "MariaDB"}],
+        "actions": [],
+        "needs_clarification": False,
+        "scope": {"mariadb_node_total": total},
+        "answer_source": "local",
+        "mode": "grounded_cluster_health",
+        "provenance": "Grounded Kubernetes data",
+    }
+
+
+def answer_cluster_health_overview(k8s_auth=None) -> dict[str, Any]:
+    summary = k8s_ops.get_k8s_node_health_density_summary(auth=k8s_auth)
+    nodes = list(summary.get("nodes") or [])
+    total = len(nodes)
+    ready = sum(1 for item in nodes if item.get("ready") is True)
+    not_ready = total - ready
+    cordoned = int((summary.get("condition_counts") or {}).get("Cordoned", 0) or 0)
+    pressure_counts = {
+        key: int(value or 0)
+        for key, value in (summary.get("condition_counts") or {}).items()
+        if key not in {"NotReady", "Cordoned"}
+    }
+    pressure_findings = [f"{count} nodes reporting {name}" for name, count in pressure_counts.items() if count > 0]
+    findings: list[str] = []
+    if not_ready:
+        findings.append(f"{not_ready} nodes are NotReady.")
+    if cordoned:
+        findings.append(f"{cordoned} nodes are cordoned.")
+    findings.extend(pressure_findings[:3])
+    if not findings:
+        findings.append("No obvious node-readiness or pressure issues were detected.")
+    answer = f"{ready} of {total} Kubernetes nodes are Ready."
+    if not_ready or cordoned or pressure_findings:
+        answer += " The main health signals to review are: " + "; ".join(findings[:3])
+    return {
+        "intent": "cluster_health_overview",
+        "answer": answer,
+        "confidence": 0.9 if total else 0.55,
+        "entities": [{"kind": "cluster", "id": "cluster", "label": "cluster"}],
+        "actions": [],
+        "needs_clarification": False,
+        "findings": findings[:3],
+        "scope": {"node_total": total, "node_ready": ready, "node_not_ready": not_ready, "node_cordoned": cordoned},
+        "answer_source": "local",
+        "mode": "grounded_cluster_health",
+        "provenance": "Grounded Kubernetes data",
+    }
+
+
 def answer_control_plane_component_summary(component: str, k8s_auth=None) -> dict[str, Any]:
     pods = k8s_ops.list_k8s_pods("kube-system", auth=k8s_auth)
     prefixes = {

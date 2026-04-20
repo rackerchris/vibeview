@@ -1320,6 +1320,52 @@ def test_assistant_service_answers_etcd_health_summary(monkeypatch):
     assert result["answer_source"] == "local"
 
 
+def test_assistant_service_answers_mariadb_node_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for mariadb cluster questions")),
+    )
+    monkeypatch.setattr(
+        assistant_cluster_answers.k8s_ops,
+        "get_mariadb_node_names",
+        lambda auth=None: {"node-2", "node-3"},
+    )
+
+    result = assistant_service.answer_assistant_query("how many mariadb nodes do we have?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "mariadb_node_summary"
+    assert "2 Kubernetes nodes currently hosting MariaDB cluster pods" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_cluster_health_overview(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for cluster health overview questions")),
+    )
+    monkeypatch.setattr(
+        assistant_cluster_answers.k8s_ops,
+        "get_k8s_node_health_density_summary",
+        lambda auth=None: {
+            "nodes": [
+                {"name": "node-1", "ready": True},
+                {"name": "node-2", "ready": True},
+                {"name": "node-3", "ready": False},
+            ],
+            "condition_counts": {"NotReady": 1, "Cordoned": 1, "MemoryPressure": 2},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("is the cluster healthy right now?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "cluster_health_overview"
+    assert "2 of 3 Kubernetes nodes are Ready" in result["answer"]
+    assert "NotReady" in " ".join(result.get("findings") or [])
+    assert result["answer_source"] == "local"
+
+
 def test_assistant_service_answers_node_ready_summary(monkeypatch):
     monkeypatch.setattr(
         assistant_service,
@@ -1530,7 +1576,7 @@ def test_assistant_service_coerces_string_confidence_for_platform_knowledge(monk
     assert result["confidence"] == 0.85
 
 
-def test_assistant_service_answers_general_chat(monkeypatch):
+def test_assistant_service_answers_domain_chat(monkeypatch):
     monkeypatch.setattr(
         assistant_service,
         "_default_project_context",
@@ -1550,18 +1596,18 @@ def test_assistant_service_answers_general_chat(monkeypatch):
     )
     monkeypatch.setattr(
         assistant_service,
-        "answer_general_chat",
+        "answer_domain_chat",
         lambda query, provider: {
-            "answer": "42 is a classic answer, but meaning is what you make of it.",
+            "answer": "Linux is usually the better default for Kubernetes workers because ecosystem support is broader.",
             "confidence": 0.7,
         },
     )
 
-    result = assistant_service.answer_assistant_query("what's the meaning of life", auth=None)
+    result = assistant_service.answer_assistant_query("should i use linux or windows for kubernetes workers?", auth=None)
 
-    assert result["intent"] == "general_chat"
-    assert result["mode"] == "general_chat"
-    assert "42" in result["answer"]
+    assert result["intent"] == "domain_chat"
+    assert result["mode"] == "domain_chat"
+    assert "Linux" in result["answer"]
     assert result["parser_source"] == "xerotier"
     assert result["answer_source"] == "xerotier"
 
@@ -1615,38 +1661,19 @@ def test_assistant_service_overrides_provider_network_summary_for_diagnosis(monk
     assert "high-risk security groups" in result["answer"]
 
 
-def test_assistant_service_overrides_provider_unknown_for_general_chat(monkeypatch):
+def test_assistant_service_rejects_out_of_scope_query(monkeypatch):
     monkeypatch.setattr(
         assistant_service,
         "_default_project_context",
         lambda auth, selected_project_id="": {"project_id": "", "project_name": ""},
     )
-    monkeypatch.setattr(
-        assistant_service,
-        "_parse_query_with_provider",
-        lambda query, context: {
-            "intent": "unknown",
-            "resource_kind": "",
-            "resource_name": "",
-            "needs_clarification": False,
-            "parser_source": "xerotier",
-        },
-    )
-    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
-    monkeypatch.setattr(
-        assistant_service,
-        "answer_general_chat",
-        lambda query, provider: {
-            "answer": "42 is the classic punchline.",
-            "confidence": 0.7,
-        },
-    )
 
     result = assistant_service.answer_assistant_query("what is the meaning of life?", auth=None)
 
-    assert result["intent"] == "general_chat"
-    assert result["mode"] == "general_chat"
-    assert "42" in result["answer"]
+    assert result["intent"] == "out_of_scope"
+    assert result["mode"] == "out_of_scope"
+    assert "scoped to infrastructure and platform topics" in result["answer"]
+    assert result["answer_source"] == "local"
 
 
 def test_ports_endpoints_return_items(monkeypatch):
