@@ -68,6 +68,15 @@ body {
 .top-search-shell {
   position: relative;
 }
+.footer-search-shell {
+  flex: 0 0 340px;
+  min-width: 340px;
+  max-width: 340px;
+}
+.footer-search {
+  width: 100%;
+  max-width: 100%;
+}
 .top-search:focus {
   border-color: rgba(255,255,255,0.35);
   background: rgba(255,255,255,0.14);
@@ -195,6 +204,10 @@ body {
 .global-search-meta {
   border-top: 1px solid #edf1f5;
   background: #f9fbfd;
+}
+.footer-search-shell .global-search-dropdown {
+  top: auto;
+  bottom: calc(100% + 10px);
 }
 .assistant-panel {
   position: fixed;
@@ -378,7 +391,7 @@ body {
   color: var(--dim);
 }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
-#clock  { color: #90a4ae; font-size: 12px; }
+#clock  { color: #c9d4dd; font-size: 12px; }
 #ws-pill { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #b0bec5; }
 #ws-dot  { width: 7px; height: 7px; border-radius: 50%; background: var(--red-lt); transition: background 0.3s; }
 #ws-dot.live { background: var(--green-lt); }
@@ -401,6 +414,59 @@ body {
   font-family: inherit;
 }
 .polling-control select option { color: #263238; }
+
+#footer-bar {
+  background: linear-gradient(180deg, #1d2838 0%, #182230 100%);
+  border-top: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 -2px 0 rgba(0,114,198,0.25);
+  padding: 10px 14px;
+  flex-shrink: 0;
+}
+.footer-search-row,
+.footer-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.footer-search-row {
+  justify-content: space-between;
+}
+.footer-meta-row {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.footer-meta-item {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0;
+  color: #b0bec5;
+  font-size: 11px;
+}
+.footer-session-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+#footer-bar .user-badge {
+  color: #dce4ea;
+}
+#footer-bar .polling-control {
+  gap: 8px;
+}
+#footer-bar .user-badge,
+#footer-bar #ws-pill,
+#footer-bar .polling-control,
+#footer-bar .footer-meta-item {
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+}
 
 /* ═══════════════════════════════════════════════════════
    BREADCRUMB BAR
@@ -2159,6 +2225,7 @@ body.no-hints .vmware-ref-card { display: none !important; }
 
 @media print {
   #top-bar,
+  #footer-bar,
   #breadcrumb-bar,
   .reports-nav,
   .report-head-actions { display: none !important; }

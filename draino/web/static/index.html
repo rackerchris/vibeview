@@ -27,31 +27,9 @@
     <a data-view="monitor"                       onclick="switchView('monitor')">Monitor</a>
   </nav>
   <div class="top-right">
-    <div class="top-search-shell">
-      <input id="global-search-input" class="top-search" type="text" placeholder="🔍  Search nodes, instances…" autocomplete="off" aria-label="Global search">
-      <div id="global-search-dropdown" class="global-search-dropdown" style="display:none"></div>
-    </div>
     <button class="btn" id="assistant-toggle-btn" onclick="toggleAssistantPanel()">Assistant</button>
-    <label class="polling-control" for="polling-select" title="Background refresh cadence for node inventory and VM list">
-      <span>Polling</span>
-      <select id="polling-select" onchange="setPollingInterval(this.value)">
-        <option value="15">15s</option>
-        <option value="30">30s</option>
-        <option value="60">60s</option>
-        <option value="0">Manual</option>
-      </select>
-    </label>
     <button class="hint-toggle" id="hint-toggle" onclick="toggleHints()" title="Toggle VMware terminology hints">💡 Hints off</button>
     <button class="btn top-action" id="logout-btn" onclick="logout()">Sign out</button>
-    <div id="clock"></div>
-    <div id="ws-pill">
-      <div id="ws-dot"></div>
-      <span id="ws-label">Connecting…</span>
-    </div>
-    <div class="user-badge" id="user-badge">
-      <div class="user-dot" id="user-dot">D</div>
-      <span id="user-label">Auth required</span>
-    </div>
   </div>
 </div>
 
@@ -495,6 +473,38 @@
         <tr><td colspan="5" style="color:var(--dim);text-align:center;padding:10px">No active tasks.</td></tr>
       </tbody>
     </table>
+  </div>
+</div>
+
+<div id="footer-bar">
+  <div class="footer-search-row">
+    <div class="top-search-shell footer-search-shell">
+      <input id="global-search-input" class="top-search footer-search" type="text" placeholder="Search nodes, instances, projects, ports, floating IPs…" autocomplete="off" aria-label="Global search">
+      <div id="global-search-dropdown" class="global-search-dropdown" style="display:none"></div>
+    </div>
+    <div class="footer-meta-row">
+    <div class="footer-meta-item" id="clock"></div>
+    <label class="polling-control" for="polling-select" title="Background refresh cadence for node inventory and VM list">
+      <span>Polling</span>
+      <select id="polling-select" onchange="setPollingInterval(this.value)">
+        <option value="15">15s</option>
+        <option value="30">30s</option>
+        <option value="60">60s</option>
+        <option value="0">Manual</option>
+      </select>
+    </label>
+    <div class="footer-meta-item" id="polling-countdown">Next refresh --:--</div>
+    <div class="footer-session-group">
+      <div id="ws-pill">
+        <div id="ws-dot"></div>
+        <span id="ws-label">Connecting…</span>
+      </div>
+      <div class="user-badge" id="user-badge">
+        <div class="user-dot" id="user-dot">D</div>
+        <span id="user-label">Auth required</span>
+      </div>
+    </div>
+    </div>
   </div>
 </div>
 

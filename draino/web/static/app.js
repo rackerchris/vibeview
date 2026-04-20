@@ -5,6 +5,7 @@ const DEFAULT_POLLING_INTERVAL_SECONDS = 15;
 let inventoryRefreshTimer = null;
 let preflightRefreshTimer = null;
 let pollingIntervalSeconds = DEFAULT_POLLING_INTERVAL_SECONDS;
+let nextInventoryRefreshAt = 0;
 
 function setCookie(name, value, maxAgeSeconds) {
   document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAgeSeconds}; samesite=lax`;
@@ -29,6 +30,7 @@ function normalisePollingInterval(value) {
 function inventoryRefreshTick() {
   if (pollingIntervalSeconds <= 0) return;
   wsSend({ action: 'refresh_silent' });
+  nextInventoryRefreshAt = Date.now() + (pollingIntervalSeconds * 1000);
 }
 
 function preflightRefreshTick() {
@@ -45,8 +47,12 @@ function restartPollingTimers() {
   if (preflightRefreshTimer) clearInterval(preflightRefreshTimer);
   inventoryRefreshTimer = null;
   preflightRefreshTimer = null;
-  if (pollingIntervalSeconds <= 0) return;
+  if (pollingIntervalSeconds <= 0) {
+    nextInventoryRefreshAt = 0;
+    return;
+  }
   const intervalMs = pollingIntervalSeconds * 1000;
+  nextInventoryRefreshAt = Date.now() + intervalMs;
   inventoryRefreshTimer = setInterval(inventoryRefreshTick, intervalMs);
   preflightRefreshTimer = setInterval(preflightRefreshTick, intervalMs);
 }
@@ -72,7 +78,31 @@ function initPollingInterval() {
 // ════════════════════════════════════════════════════════════════════════════
 
 setInterval(() => {
-  document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  const now = new Date();
+  const clock = document.getElementById('clock');
+  if (clock) {
+    clock.textContent = now.toLocaleString('en-GB', {
+      hour12: false,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  }
+  const countdown = document.getElementById('polling-countdown');
+  if (countdown) {
+    if (pollingIntervalSeconds <= 0 || !nextInventoryRefreshAt) {
+      countdown.textContent = 'Next refresh Manual';
+    } else {
+      const remainingMs = Math.max(0, nextInventoryRefreshAt - Date.now());
+      const totalSeconds = Math.ceil(remainingMs / 1000);
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      countdown.textContent = `Next refresh ${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+  }
   // Refresh summary while rebooting (live downtime counter)
   if (selectedNode && nodes[selectedNode]) {
     const nd = nodes[selectedNode];
