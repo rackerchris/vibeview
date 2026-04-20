@@ -1732,8 +1732,8 @@ def test_assistant_service_uses_provider_extraction_for_freeform_environment_que
     )
     monkeypatch.setattr(
         assistant_service,
-        "answer_highest_ram_hypervisor_summary",
-        lambda auth=None, k8s_auth=None: {
+        "answer_environment_summary",
+        lambda intent, auth=None, k8s_auth=None: {
             "intent": "highest_ram_hypervisor_summary",
             "answer": "The hypervisor using the most RAM is `cmp-2` with `96.0 GiB` in use.",
             "confidence": 0.88,

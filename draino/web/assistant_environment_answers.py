@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .. import node_agent_client
 from ..operations import k8s_ops, openstack_ops
@@ -468,3 +468,27 @@ def answer_emptiest_hypervisor_summary(openstack_auth=None, k8s_auth=None) -> di
         findings_label="Least-loaded hypervisors by running VMs",
         collector="summary",
     )
+
+
+ENVIRONMENT_SUMMARY_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
+    "kernel_version_summary": answer_kernel_version_summary,
+    "missing_node_agent_summary": answer_missing_node_agent_summary,
+    "reboot_needed_summary": answer_reboot_needed_summary,
+    "empty_compute_nodes_summary": answer_empty_compute_nodes_summary,
+    "busiest_hypervisor_summary": answer_busiest_hypervisor_summary,
+    "emptiest_hypervisor_summary": answer_emptiest_hypervisor_summary,
+    "highest_ram_hypervisor_summary": answer_highest_ram_hypervisor_summary,
+    "highest_cpu_hypervisor_summary": answer_highest_cpu_hypervisor_summary,
+    "highest_disk_hypervisor_summary": answer_highest_disk_hypervisor_summary,
+}
+
+ENVIRONMENT_SUMMARY_INTENTS = frozenset(ENVIRONMENT_SUMMARY_HANDLERS.keys())
+
+
+def answer_environment_summary(intent: str, openstack_auth=None, k8s_auth=None) -> dict[str, Any] | None:
+    handler = ENVIRONMENT_SUMMARY_HANDLERS.get(str(intent or "").strip())
+    if handler is None:
+        return None
+    if intent in {"kernel_version_summary", "missing_node_agent_summary"}:
+        return handler(k8s_auth=k8s_auth)
+    return handler(openstack_auth=openstack_auth, k8s_auth=k8s_auth)

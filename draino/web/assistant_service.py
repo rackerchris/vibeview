@@ -45,15 +45,8 @@ from .assistant_cluster_answers import (
     answer_node_ready_summary,
 )
 from .assistant_environment_answers import (
-    answer_busiest_hypervisor_summary,
-    answer_emptiest_hypervisor_summary,
-    answer_empty_compute_nodes_summary,
-    answer_highest_cpu_hypervisor_summary,
-    answer_highest_disk_hypervisor_summary,
-    answer_highest_ram_hypervisor_summary,
-    answer_kernel_version_summary,
-    answer_missing_node_agent_summary,
-    answer_reboot_needed_summary,
+    ENVIRONMENT_SUMMARY_INTENTS as REGISTERED_ENVIRONMENT_SUMMARY_INTENTS,
+    answer_environment_summary,
 )
 from .assistant_synthesis import (
     answer_domain_chat,
@@ -125,17 +118,7 @@ _RESOURCE_SUMMARY_INTENTS = {
     "highest_disk_hypervisor_summary",
 }
 
-_ENVIRONMENT_SUMMARY_INTENTS = {
-    "kernel_version_summary",
-    "missing_node_agent_summary",
-    "reboot_needed_summary",
-    "empty_compute_nodes_summary",
-    "busiest_hypervisor_summary",
-    "emptiest_hypervisor_summary",
-    "highest_ram_hypervisor_summary",
-    "highest_cpu_hypervisor_summary",
-    "highest_disk_hypervisor_summary",
-}
+_ENVIRONMENT_SUMMARY_INTENTS = set(REGISTERED_ENVIRONMENT_SUMMARY_INTENTS)
 
 _RESOURCE_KIND_ALIASES = {
     "network": "network",
@@ -1964,24 +1947,16 @@ def answer_assistant_query(
         response = answer_node_ready_summary(k8s_auth)
     elif intent == "control_plane_component_summary":
         response = answer_control_plane_component_summary(resource_name or "control_plane", k8s_auth)
-    elif intent == "kernel_version_summary":
-        response = answer_kernel_version_summary(k8s_auth)
-    elif intent == "missing_node_agent_summary":
-        response = answer_missing_node_agent_summary(k8s_auth)
-    elif intent == "reboot_needed_summary":
-        response = answer_reboot_needed_summary(auth, k8s_auth)
-    elif intent == "empty_compute_nodes_summary":
-        response = answer_empty_compute_nodes_summary(auth, k8s_auth)
-    elif intent == "busiest_hypervisor_summary":
-        response = answer_busiest_hypervisor_summary(auth, k8s_auth)
-    elif intent == "emptiest_hypervisor_summary":
-        response = answer_emptiest_hypervisor_summary(auth, k8s_auth)
-    elif intent == "highest_ram_hypervisor_summary":
-        response = answer_highest_ram_hypervisor_summary(auth, k8s_auth)
-    elif intent == "highest_cpu_hypervisor_summary":
-        response = answer_highest_cpu_hypervisor_summary(auth, k8s_auth)
-    elif intent == "highest_disk_hypervisor_summary":
-        response = answer_highest_disk_hypervisor_summary(auth, k8s_auth)
+    elif intent in _ENVIRONMENT_SUMMARY_INTENTS:
+        response = answer_environment_summary(intent, auth, k8s_auth) or {
+            "intent": intent,
+            "answer": "I could not answer that environment summary right now.",
+            "confidence": 0.2,
+            "entities": [],
+            "actions": [],
+            "needs_clarification": False,
+            "answer_source": "local",
+        }
     elif intent == "port_attachment_status":
         response = answer_port_attachment_status(
             resource_name,
