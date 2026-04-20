@@ -8,6 +8,7 @@ from draino.web import server as web_server
 from draino.web.api import resources as resource_api
 from draino.web import assistant_evidence
 from draino.web import assistant_cluster_answers
+from draino.web import assistant_environment_answers
 from draino.web import assistant_service
 from draino.web import assistant_resource_answers
 from draino.web import resource_helpers
@@ -1410,6 +1411,312 @@ def test_assistant_service_answers_apiserver_health_summary(monkeypatch):
 
     assert result["intent"] == "control_plane_component_summary"
     assert "2 of 3 API server pods are healthy" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_kernel_version_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for environment kernel questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "node-1", "hostname": "hv-1", "kernel_version": "5.14.0-500"},
+            {"name": "node-2", "hostname": "hv-2", "kernel_version": "5.14.0-510"},
+            {"name": "node-3", "hostname": "hv-3", "kernel_version": "5.14.0-510"},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_node_host_signals",
+        lambda node_name, hostname=None: {
+            "kernel_version": "5.14.0-500" if node_name == "node-1" else "5.14.0-510",
+            "latest_kernel_version": "5.14.0-510",
+            "reboot_required": node_name == "node-1",
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what is the most recent kernel in this environment?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "kernel_version_summary"
+    assert "`5.14.0-510`" in result["answer"]
+    assert "Nodes behind latest kernel" in " ".join(result.get("findings") or [])
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_missing_node_agent_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for node-agent summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "node-1"},
+            {"name": "node-2"},
+            {"name": "node-3"},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.node_agent_client,
+        "get_ready_node_names",
+        lambda: {"node-1"},
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes are missing the node agent?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "missing_node_agent_summary"
+    assert "Nodes missing a ready node agent: 2" in result["answer"]
+    assert "- node-2" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_reboot_needed_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for reboot summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 4, "compute_status": "up"},
+            "cmp-2": {"vm_count": 0, "compute_status": "up"},
+        },
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_node_host_signals",
+        lambda node_name, hostname=None: {
+            "kernel_version": "5.14.0-500",
+            "latest_kernel_version": "5.14.0-510",
+            "reboot_required": node_name == "cmp-1",
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes need to be rebooted?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "reboot_needed_summary"
+    assert "Compute nodes that appear to need reboot: 1" in result["answer"]
+    assert "- cmp-1" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_empty_compute_nodes_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for empty compute summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "net-1", "hostname": "net-1", "is_compute": False},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 3, "compute_status": "up"},
+            "cmp-2": {"vm_count": 0, "compute_status": "up"},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which nodes have no running vms?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "empty_compute_nodes_summary"
+    assert "Compute nodes with no running VMs: 1" in result["answer"]
+    assert "- cmp-2" in result["answer"]
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_busiest_hypervisor_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for hypervisor load summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+            {"name": "cmp-3", "hostname": "cmp-3", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_all_host_summaries",
+        lambda auth=None: {
+            "cmp-1": {"vm_count": 11, "compute_status": "up"},
+            "cmp-2": {"vm_count": 27, "compute_status": "up"},
+            "cmp-3": {"vm_count": 6, "compute_status": "up"},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("what is the busiest hypervisor in this environment?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "busiest_hypervisor_summary"
+    assert "`cmp-2`" in result["answer"]
+    assert "`27`" in result["answer"]
+    assert "Top hypervisors by running VMs" in " ".join(result.get("findings") or [])
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_highest_ram_hypervisor_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for hypervisor RAM summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"memory_mb_used": 65536, "memory_mb": 131072, "running_vms": 11},
+            "cmp-2": {"memory_mb_used": 98304, "memory_mb": 131072, "running_vms": 9},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query("what hypervisor is using the most ram?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "highest_ram_hypervisor_summary"
+    assert "`cmp-2`" in result["answer"]
+    assert "`96.0 GiB`" in result["answer"]
+    assert "Top hypervisors by RAM in use" in " ".join(result.get("findings") or [])
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_highest_cpu_hypervisor_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for hypervisor CPU summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"vcpus_used": 24, "vcpus": 64, "running_vms": 11},
+            "cmp-2": {"vcpus_used": 37, "vcpus": 64, "running_vms": 9},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query("which hypervisor is using the most cpu?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "highest_cpu_hypervisor_summary"
+    assert "`cmp-2`" in result["answer"]
+    assert "`37 vCPUs in use`" in result["answer"]
+    assert "Top hypervisors by vCPU use" in " ".join(result.get("findings") or [])
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_answers_highest_disk_hypervisor_summary(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for hypervisor disk summary questions")),
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.k8s_ops,
+        "get_nodes",
+        lambda auth=None: [
+            {"name": "cmp-1", "hostname": "cmp-1", "is_compute": True},
+            {"name": "cmp-2", "hostname": "cmp-2", "is_compute": True},
+        ],
+    )
+    monkeypatch.setattr(
+        assistant_environment_answers.openstack_ops,
+        "get_hypervisor_detail",
+        lambda hypervisor, auth=None: {
+            "cmp-1": {"local_disk_gb_used": 880, "local_disk_gb": 1200, "running_vms": 11},
+            "cmp-2": {"local_disk_gb_used": 640, "local_disk_gb": 1200, "running_vms": 9},
+        }[hypervisor],
+    )
+
+    result = assistant_service.answer_assistant_query("which hypervisor is using the most disk?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "highest_disk_hypervisor_summary"
+    assert "`cmp-1`" in result["answer"]
+    assert "`880 GB local disk in use`" in result["answer"]
+    assert "Top hypervisors by local disk use" in " ".join(result.get("findings") or [])
+    assert result["answer_source"] == "local"
+
+
+def test_assistant_service_uses_provider_extraction_for_freeform_environment_query(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": (_ for _ in ()).throw(AssertionError("project context should be skipped for provider-extracted environment questions")),
+    )
+    monkeypatch.setattr(assistant_service, "assistant_provider_enabled", lambda: True)
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_environment_query_with_provider",
+        lambda query, fallback=None: {
+            "intent": "highest_ram_hypervisor_summary",
+            "resource_kind": "environment",
+            "resource_name": "hypervisor_ram",
+            "needs_clarification": False,
+            "parser_source": "xerotier",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "answer_highest_ram_hypervisor_summary",
+        lambda auth=None, k8s_auth=None: {
+            "intent": "highest_ram_hypervisor_summary",
+            "answer": "The hypervisor using the most RAM is `cmp-2` with `96.0 GiB` in use.",
+            "confidence": 0.88,
+            "entities": [],
+            "actions": [],
+            "needs_clarification": False,
+            "findings": ["Top hypervisors by RAM in use\n- cmp-2 (96.0 GiB)\n- cmp-1 (64.0 GiB)"],
+            "answer_source": "local",
+            "mode": "grounded_environment_summary",
+            "provenance": "Grounded Kubernetes and OpenStack data",
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("which box is carrying the most memory right now?", auth=None, k8s_auth=None)
+
+    assert result["intent"] == "highest_ram_hypervisor_summary"
+    assert result["parser_source"] == "xerotier"
     assert result["answer_source"] == "local"
 
 

@@ -44,6 +44,16 @@ from .assistant_cluster_answers import (
     answer_mariadb_node_summary,
     answer_node_ready_summary,
 )
+from .assistant_environment_answers import (
+    answer_busiest_hypervisor_summary,
+    answer_empty_compute_nodes_summary,
+    answer_highest_cpu_hypervisor_summary,
+    answer_highest_disk_hypervisor_summary,
+    answer_highest_ram_hypervisor_summary,
+    answer_kernel_version_summary,
+    answer_missing_node_agent_summary,
+    answer_reboot_needed_summary,
+)
 from .assistant_synthesis import (
     answer_domain_chat,
     answer_platform_knowledge,
@@ -103,6 +113,25 @@ _RESOURCE_SUMMARY_INTENTS = {
     "cluster_health_overview",
     "node_ready_summary",
     "control_plane_component_summary",
+    "kernel_version_summary",
+    "missing_node_agent_summary",
+    "reboot_needed_summary",
+    "empty_compute_nodes_summary",
+    "busiest_hypervisor_summary",
+    "highest_ram_hypervisor_summary",
+    "highest_cpu_hypervisor_summary",
+    "highest_disk_hypervisor_summary",
+}
+
+_ENVIRONMENT_SUMMARY_INTENTS = {
+    "kernel_version_summary",
+    "missing_node_agent_summary",
+    "reboot_needed_summary",
+    "empty_compute_nodes_summary",
+    "busiest_hypervisor_summary",
+    "highest_ram_hypervisor_summary",
+    "highest_cpu_hypervisor_summary",
+    "highest_disk_hypervisor_summary",
 }
 
 _RESOURCE_KIND_ALIASES = {
@@ -249,6 +278,36 @@ _DOMAIN_CHAT_TERMS = (
     "scheduler",
     "controller manager",
     "controller-manager",
+)
+
+_ENVIRONMENT_QUERY_TERMS = (
+    "environment",
+    "fleet",
+    "estate",
+    "cluster",
+    "hypervisor",
+    "hypervisors",
+    "compute node",
+    "compute nodes",
+    "host",
+    "hosts",
+    "node",
+    "nodes",
+    "kernel",
+    "ram",
+    "memory",
+    "cpu",
+    "vcpu",
+    "vcpus",
+    "disk",
+    "storage",
+    "node agent",
+    "node-agent",
+    "reboot",
+    "reboots",
+    "vm",
+    "vms",
+    "instances",
 )
 
 _OUT_OF_SCOPE_TERMS = (
@@ -449,6 +508,7 @@ def _intent_signals(lower: str) -> dict[str, bool]:
         "connectivity": _contains_any(lower, ("connected", "highly connected", "busy", "dense", "central")),
         "posture": _contains_any(lower, ("bootable", "encrypted", "multiattach")),
         "idle": _contains_word(lower, "idle") or _contains_word(lower, "unused") or _contains_word(lower, "free") or _contains_word(lower, "unassigned"),
+        "ranking": _contains_any(lower, ("busiest", "most busy", "most loaded", "top ", "hosts the most", "host the most")),
         "security_audit": _contains_any(lower, ("audit", "insecure", "secure", "risky")),
         "security_lockdown": _contains_any(lower, ("lock", "tighten", "suggest", "recommend")),
         "navigate": _contains_any(lower, ("open ", "show ", "inspect ", "review ", "find ", "go to ", "take me to ")),
@@ -479,6 +539,7 @@ def _classify_unhandled_query(query: str, project_context: dict[str, str]) -> st
             "connectivity",
             "posture",
             "idle",
+            "ranking",
             "security_audit",
             "security_lockdown",
             "navigate",
@@ -495,6 +556,22 @@ def _classify_unhandled_query(query: str, project_context: dict[str, str]) -> st
     if _contains_any(lower, _DOMAIN_CHAT_TERMS):
         return "domain_chat"
     return "out_of_scope"
+
+
+def _looks_like_environment_summary_query(query: str) -> bool:
+    lower = str(query or "").strip().lower()
+    if not lower:
+        return False
+    signals = _intent_signals(lower)
+    environmentish = _contains_any(lower, _ENVIRONMENT_QUERY_TERMS)
+    summaryish = any(
+        signals[key]
+        for key in ("count", "status", "alive", "usage", "idle", "ranking")
+    ) or _contains_any(
+        lower,
+        ("latest", "newest", "oldest", "recent", "behind", "missing", "most", "least", "highest", "lowest", "emptiest"),
+    )
+    return environmentish and summaryish
 
 
 def _parse_query_fallback(query: str) -> dict[str, Any]:
@@ -525,6 +602,7 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "connectivity",
             "posture",
             "idle",
+            "ranking",
             "security_audit",
             "security_lockdown",
             "navigate",
@@ -594,6 +672,62 @@ def _parse_query_fallback(query: str) -> dict[str, Any]:
             "intent": "cluster_health_overview",
             "resource_kind": "cluster",
             "resource_name": "cluster",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("kernel", "kernels")) and _contains_any(lower, ("recent", "newest", "latest", "most recent", "what kernels")):
+        return {
+            "intent": "kernel_version_summary",
+            "resource_kind": "environment",
+            "resource_name": "kernel",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("node agent", "node-agent", "agent")) and _contains_any(lower, ("missing", "without", "no ", "not reporting", "not ready", "unavailable")):
+        return {
+            "intent": "missing_node_agent_summary",
+            "resource_kind": "environment",
+            "resource_name": "node_agent",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("reboot", "reboots", "rebooted", "restarting")) and _contains_any(lower, ("need", "needs", "should", "required", "pending")):
+        return {
+            "intent": "reboot_needed_summary",
+            "resource_kind": "environment",
+            "resource_name": "reboot",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("nodes", "compute nodes", "hosts")) and _contains_any(lower, ("no running vms", "no vms", "empty", "without vms", "with no running")):
+        return {
+            "intent": "empty_compute_nodes_summary",
+            "resource_kind": "environment",
+            "resource_name": "compute_empty",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "hosts")) and _contains_any(lower, ("busiest", "most busy", "most loaded", "hosts the most vms", "host the most vms")):
+        return {
+            "intent": "busiest_hypervisor_summary",
+            "resource_kind": "environment",
+            "resource_name": "hypervisor_load",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "hosts")) and _contains_any(lower, ("most ram", "most memory", "using the most ram", "using the most memory", "highest ram", "highest memory")):
+        return {
+            "intent": "highest_ram_hypervisor_summary",
+            "resource_kind": "environment",
+            "resource_name": "hypervisor_ram",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "hosts")) and _contains_any(lower, ("most cpu", "highest cpu", "using the most cpu", "most vcpu", "most vcpus", "highest vcpu", "highest vcpus")):
+        return {
+            "intent": "highest_cpu_hypervisor_summary",
+            "resource_kind": "environment",
+            "resource_name": "hypervisor_cpu",
+            "needs_clarification": False,
+        }
+    if _contains_any(lower, ("hypervisor", "hypervisors", "compute node", "compute nodes", "hosts")) and _contains_any(lower, ("most disk", "most storage", "highest disk", "highest storage", "using the most disk", "using the most storage")):
+        return {
+            "intent": "highest_disk_hypervisor_summary",
+            "resource_kind": "environment",
+            "resource_name": "hypervisor_disk",
             "needs_clarification": False,
         }
     if sg_match and signals["security_lockdown"]:
@@ -764,6 +898,10 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
     if not fallback.get("needs_clarification") and str(fallback.get("intent") or "").strip().lower() != "unknown":
         fallback["parser_source"] = "fallback"
         return fallback
+    if _looks_like_environment_summary_query(query):
+        parsed = _parse_environment_query_with_provider(query, fallback)
+        if parsed:
+            return parsed
     if not assistant_provider_enabled():
         fallback["parser_source"] = "fallback"
         return fallback
@@ -788,12 +926,13 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
         "Allowed intents: quota_usage, quota_limit, resource_count, instance_status, instance_location, "
         "instance_project, instance_ips, instance_networks, project_network_summary, project_storage_summary, "
         "security_group_audit, security_group_lockdown_suggestions, security_group_insecure_check, "
-        "etcd_health_summary, node_ready_summary, control_plane_component_summary, "
+        "etcd_health_summary, mariadb_node_summary, cluster_health_overview, node_ready_summary, control_plane_component_summary, "
+        "kernel_version_summary, missing_node_agent_summary, reboot_needed_summary, empty_compute_nodes_summary, busiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, "
         "port_attachment_status, port_public_exposure, router_external_status, router_connectivity_summary, "
         "volume_attachment_summary, volume_posture, floating_ip_instance_status, floating_ip_lookup_by_fixed_ip, floating_ip_idle_status, "
         "open_resource, unknown. "
         "Return keys: intent, resource_kind, resource_name, needs_clarification, clarifying_question. "
-        "resource_kind can be instance, quota, project, security_group, network, router, port, floatingip, loadbalancer, volume, or empty. "
+        "resource_kind can be instance, quota, project, security_group, network, router, port, floatingip, loadbalancer, volume, cluster, environment, or empty. "
         "resource_name should be a VM name, security group name, resource name, or metric keyword such as floating_ips, cores, networks, routers, ports, instances. "
         "Never include markdown."
     )
@@ -820,6 +959,69 @@ def _parse_query_with_provider(query: str, context: dict[str, Any]) -> dict[str,
             fallback["parser_source"] = "fallback"
             return fallback
         parsed["parser_source"] = "xerotier"
+        return parsed
+    except Exception:
+        fallback["parser_source"] = "fallback"
+        return fallback
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+def _parse_environment_query_with_provider(query: str, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+    fallback = dict(fallback or _parse_query_fallback(query))
+    if not assistant_provider_enabled():
+        fallback["parser_source"] = "fallback"
+        return fallback
+    try:
+        from openai import OpenAI
+    except Exception:
+        fallback["parser_source"] = "fallback"
+        return fallback
+    timeout_seconds = min(_ASSISTANT_TIMEOUT_SECONDS, _ASSISTANT_PARSE_TIMEOUT_SECONDS)
+    client = OpenAI(
+        base_url=_ASSISTANT_BASE_URL,
+        api_key=_ASSISTANT_API_KEY,
+        timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds), read=timeout_seconds, write=min(3.0, timeout_seconds)),
+        max_retries=0,
+        http_client=httpx.Client(
+            timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds), read=timeout_seconds, write=min(3.0, timeout_seconds)),
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+        ),
+    )
+    system_prompt = (
+        "Classify environment and fleet questions into JSON only. "
+        "Allowed intents: kernel_version_summary, missing_node_agent_summary, reboot_needed_summary, "
+        "empty_compute_nodes_summary, busiest_hypervisor_summary, highest_ram_hypervisor_summary, highest_cpu_hypervisor_summary, highest_disk_hypervisor_summary, unknown. "
+        "Map freeform wording about environment-wide compute, host, node, hypervisor, kernel, RAM, reboot, VM density, or missing agents "
+        "to the closest supported intent. "
+        "Return keys: intent, resource_kind, resource_name, needs_clarification, clarifying_question. "
+        "resource_kind must be environment or empty. resource_name should be a short metric keyword such as kernel, node_agent, reboot, compute_empty, hypervisor_load, hypervisor_ram, hypervisor_cpu, or hypervisor_disk. "
+        "Never include markdown."
+    )
+    user_prompt = json.dumps({"query": query})
+    try:
+        response = client.chat.completions.create(
+            model=_ASSISTANT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        parsed = _safe_json_parse(str(content or ""))
+        intent = str(parsed.get("intent") or "").strip().lower()
+        if intent not in _ENVIRONMENT_SUMMARY_INTENTS:
+            fallback["parser_source"] = "fallback"
+            return fallback
+        parsed["parser_source"] = "xerotier"
+        parsed.setdefault("resource_kind", "environment")
+        parsed.setdefault("needs_clarification", False)
         return parsed
     except Exception:
         fallback["parser_source"] = "fallback"
@@ -1437,13 +1639,22 @@ def answer_assistant_query(
     }
     fallback_preview = _parse_query_fallback(text)
     preview_intent = str(fallback_preview.get("intent") or "").strip().lower()
+    environment_like_query = _looks_like_environment_summary_query(text)
     task = _classify_unhandled_query(text, project_context)
-    if task != "platform_knowledge" and preview_intent not in {
+    if task != "platform_knowledge" and not environment_like_query and preview_intent not in {
         "etcd_health_summary",
         "mariadb_node_summary",
         "cluster_health_overview",
         "node_ready_summary",
         "control_plane_component_summary",
+        "kernel_version_summary",
+        "missing_node_agent_summary",
+        "reboot_needed_summary",
+        "empty_compute_nodes_summary",
+        "busiest_hypervisor_summary",
+        "highest_ram_hypervisor_summary",
+        "highest_cpu_hypervisor_summary",
+        "highest_disk_hypervisor_summary",
     }:
         
         project_context = _default_project_context(auth, selected_project_id)
@@ -1668,6 +1879,22 @@ def answer_assistant_query(
         response = answer_node_ready_summary(k8s_auth)
     elif intent == "control_plane_component_summary":
         response = answer_control_plane_component_summary(resource_name or "control_plane", k8s_auth)
+    elif intent == "kernel_version_summary":
+        response = answer_kernel_version_summary(k8s_auth)
+    elif intent == "missing_node_agent_summary":
+        response = answer_missing_node_agent_summary(k8s_auth)
+    elif intent == "reboot_needed_summary":
+        response = answer_reboot_needed_summary(auth, k8s_auth)
+    elif intent == "empty_compute_nodes_summary":
+        response = answer_empty_compute_nodes_summary(auth, k8s_auth)
+    elif intent == "busiest_hypervisor_summary":
+        response = answer_busiest_hypervisor_summary(auth, k8s_auth)
+    elif intent == "highest_ram_hypervisor_summary":
+        response = answer_highest_ram_hypervisor_summary(auth, k8s_auth)
+    elif intent == "highest_cpu_hypervisor_summary":
+        response = answer_highest_cpu_hypervisor_summary(auth, k8s_auth)
+    elif intent == "highest_disk_hypervisor_summary":
+        response = answer_highest_disk_hypervisor_summary(auth, k8s_auth)
     elif intent == "port_attachment_status":
         response = answer_port_attachment_status(
             resource_name,

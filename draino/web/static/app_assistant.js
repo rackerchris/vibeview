@@ -420,8 +420,8 @@ function renderAssistantDetails(result) {
   if (!findings.length && !recommendations.length) return '';
   return `
     <div class="assistant-clarify">
-      ${findings.length ? `<div class="assistant-clarify-title">Findings</div><div class="assistant-choice-list">${findings.map((item) => `<div class="assistant-choice"><span class="assistant-choice-label">${esc(item)}</span></div>`).join('')}</div>` : ''}
-      ${recommendations.length ? `<div class="assistant-clarify-title" style="margin-top:10px">Recommendations</div><div class="assistant-choice-list">${recommendations.map((item) => `<div class="assistant-choice"><span class="assistant-choice-label">${esc(item)}</span></div>`).join('')}</div>` : ''}
+      ${findings.length ? `<div class="assistant-clarify-title">Findings</div><div class="assistant-choice-list">${findings.map((item) => `<div class="assistant-choice"><div class="assistant-choice-copy">${renderAssistantAnswer(item)}</div></div>`).join('')}</div>` : ''}
+      ${recommendations.length ? `<div class="assistant-clarify-title" style="margin-top:10px">Recommendations</div><div class="assistant-choice-list">${recommendations.map((item) => `<div class="assistant-choice"><div class="assistant-choice-copy">${renderAssistantAnswer(item)}</div></div>`).join('')}</div>` : ''}
     </div>
   `;
 }
