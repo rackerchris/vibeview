@@ -59,7 +59,7 @@ from .assistant_synthesis import (
     stream_platform_knowledge_with_context,
     synthesize_network_diagnosis,
 )
-from .assistant_followups import answer_followup_query
+from .assistant_followups import answer_followup_query, detect_followup_kind
 from .assistant_openstack_knowledge import (
     build_platform_knowledge_context,
     fallback_platform_knowledge_answer,
@@ -615,11 +615,13 @@ def _classify_unhandled_query(query: str, project_context: dict[str, str]) -> st
         return "platform_knowledge"
     if _looks_like_environment_summary_query(query):
         return "environment_summary"
+    if operational_signals and _contains_any(lower, _OPENSTACK_KNOWLEDGE_TERMS):
+        return "unknown"
     if _contains_any(lower, _OUT_OF_SCOPE_TERMS):
         return "out_of_scope"
     if _contains_any(lower, _DOMAIN_CHAT_TERMS):
         return "domain_chat"
-    return "out_of_scope"
+    return "unknown"
 
 
 def _looks_like_environment_summary_query(query: str) -> bool:
@@ -1306,14 +1308,30 @@ def _resolve_project(query: str, auth, k8s_auth=None) -> tuple[dict[str, Any] | 
 
 
 def _extract_project_hint(query: str) -> str:
-    match = re.search(r"\bproject\s+([A-Za-z0-9._:-]+(?:[ -][A-Za-z0-9._:-]+)*)", str(query or ""), re.IGNORECASE)
-    if not match:
-        return ""
-    hint = re.sub(r"[?.,!]+$", "", match.group(1)).strip()
+    text = str(query or "")
+    invalid_forward_hints = {"using", "have", "has", "with", "on", "in", "at", "for", "limit", "quota"}
+    match = re.search(r"\bproject\s+([A-Za-z0-9._:-]+(?:[ -][A-Za-z0-9._:-]+)*)", text, re.IGNORECASE)
+    if match and str(match.group(1) or "").strip().lower() not in invalid_forward_hints:
+        hint = re.sub(r"[?.,!]+$", "", match.group(1)).strip()
+    else:
+        reverse_match = re.search(r"\b([A-Za-z0-9._:-]+)\s+project\b", text, re.IGNORECASE)
+        if not reverse_match:
+            return ""
+        hint = re.sub(r"[?.,!]+$", "", reverse_match.group(1)).strip()
     for suffix in (" using", " have", " has", " with", " on", " in", " at", " for", " limit", " quota"):
         if hint.lower().endswith(suffix):
             hint = hint[: -len(suffix)].strip()
     return hint
+
+
+def _looks_like_followup_query(query: str) -> bool:
+    lower = str(query or "").strip().lower()
+    if not lower:
+        return False
+    return bool(
+        detect_followup_kind(query)
+        or re.search(r"\b(show|compare|open|why|which|what changed|is that|just show)\b", lower)
+    )
 
 
 def _choice_from_candidate(kind: str, item: dict[str, Any]) -> dict[str, Any]:
@@ -1894,7 +1912,12 @@ def answer_assistant_query(
         }
     followup_parse_ms = 0.0
     parsed_followup: dict[str, Any] | None = None
-    if isinstance(previous_result, dict) and previous_result and assistant_provider_enabled():
+    if (
+        isinstance(previous_result, dict)
+        and previous_result
+        and assistant_provider_enabled()
+        and _looks_like_followup_query(text)
+    ):
         followup_parse_started = time.perf_counter()
         parsed_followup = _parse_followup_with_provider(text, previous_result) or None
         followup_parse_ms = round((time.perf_counter() - followup_parse_started) * 1000, 1) if parsed_followup else 0.0

@@ -3406,6 +3406,92 @@ def test_assistant_service_rejects_out_of_scope_query(monkeypatch):
     assert result["answer_source"] == "local"
 
 
+def test_assistant_service_does_not_mark_quota_usage_question_out_of_scope(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "quota_usage",
+            "resource_kind": "quota",
+            "resource_name": "floating_ips",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_project_quota_summary",
+        lambda project_id, auth=None: {
+            "network": {
+                "floatingip": {"limit": 50, "used": 13},
+            },
+            "compute": {},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query("how many floating ips am i using?", auth=None)
+
+    assert result["intent"] == "quota_usage"
+    assert "scoped to infrastructure and platform topics" not in str(result.get("answer") or "")
+    assert result["answer_source"] == "local"
+
+
+def test_extract_project_hint_supports_reverse_project_order():
+    assert assistant_service._extract_project_hint("how many floating ips is the service project using?") == "service"
+
+
+def test_assistant_service_skips_provider_followup_parse_for_fresh_quota_question(monkeypatch):
+    monkeypatch.setattr(
+        assistant_service,
+        "_default_project_context",
+        lambda auth, selected_project_id="": {"project_id": "proj-1", "project_name": "admin"},
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_followup_with_provider",
+        lambda query, previous_result: (_ for _ in ()).throw(AssertionError("provider follow-up parse should be skipped for non-follow-up quota questions")),
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "_parse_query_with_provider",
+        lambda query, context: {
+            "intent": "quota_usage",
+            "resource_kind": "quota",
+            "resource_name": "floating_ips",
+            "needs_clarification": False,
+            "parser_source": "fallback",
+        },
+    )
+    monkeypatch.setattr(
+        assistant_service,
+        "get_project_quota_summary",
+        lambda project_id, auth=None: {
+            "network": {"floatingip": {"limit": 50, "used": 16}},
+            "compute": {},
+        },
+    )
+
+    result = assistant_service.answer_assistant_query(
+        "how many floating ips am i using?",
+        auth=None,
+        previous_result={
+            "intent": "quota_usage",
+            "mode": "grounded_environment_summary",
+            "scope": {},
+            "findings": [],
+            "actions": [],
+        },
+    )
+
+    assert result["intent"] == "quota_usage"
+    assert result["answer_source"] == "local"
+
+
 def test_ports_endpoints_return_items(monkeypatch):
     monkeypatch.setattr(web_server.DrainoServer, "start_refresh", lambda self, cached_nodes=None, silent=False: None)
     monkeypatch.setattr(web_server.k8s_ops, "get_nodes", lambda auth=None: [])
