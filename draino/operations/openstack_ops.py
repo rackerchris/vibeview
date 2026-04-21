@@ -1154,6 +1154,9 @@ def get_instance_network_detail(
     server_data = server.to_dict() if hasattr(server, "to_dict") else {}
     flavor_ref = getattr(server, "flavor", None) or server_data.get("flavor") or {}
     flavor_data = _resolve_flavor_data(conn, flavor_ref)
+    raw_user_data = server_data.get("OS-EXT-SRV-ATTR:user_data")
+    user_data_visible = "OS-EXT-SRV-ATTR:user_data" in server_data
+    user_data_present = isinstance(raw_user_data, str) and bool(raw_user_data.strip())
 
     network_names: dict[str, str] = {}
     subnet_dhcp: dict[str, bool | None] = {}
@@ -1378,6 +1381,7 @@ def get_instance_network_detail(
         "id": getattr(server, "id", None) or instance_id,
         "name": getattr(server, "name", None) or instance_id,
         "status": getattr(server, "status", None) or "UNKNOWN",
+        "key_name": getattr(server, "key_name", None) or server_data.get("key_name") or "",
         "compute_host": _server_host(server) or "",
         "availability_zone": getattr(server, "availability_zone", None) or server_data.get("OS-EXT-AZ:availability_zone") or "",
         "task_state": getattr(server, "task_state", None) or server_data.get("OS-EXT-STS:task_state"),
@@ -1385,6 +1389,8 @@ def get_instance_network_detail(
         "updated_at": getattr(server, "updated_at", None) or server_data.get("updated"),
         "is_volume_backed": not getattr(server, "image", None),
         "flavor": flavor_data,
+        "user_data_visible": user_data_visible,
+        "user_data_present": user_data_present,
         "ports": ports,
         "related_load_balancers": related_load_balancers,
     }

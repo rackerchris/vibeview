@@ -284,7 +284,12 @@ def test_clone_instance_creates_ports_volumes_server_and_floating_ip(monkeypatch
         attached_volumes = [{"id": "root-vol"}, {"id": "data-vol"}]
 
         def to_dict(self):
-            return {"project_id": "proj-1", "OS-EXT-AZ:availability_zone": "nova", "metadata": {"role": "api"}}
+            return {
+                "project_id": "proj-1",
+                "OS-EXT-AZ:availability_zone": "nova",
+                "OS-EXT-SRV-ATTR:user_data": "I2Nsb3VkLWNvbmZpZwo=",
+                "metadata": {"role": "api"},
+            }
 
     class FakeSourcePort:
         id = "port-1"
@@ -293,7 +298,11 @@ def test_clone_instance_creates_ports_volumes_server_and_floating_ip(monkeypatch
         security_group_ids = ["sg-1", "sg-2"]
 
         def to_dict(self):
-            return {"network_id": "net-1", "security_group_ids": ["sg-1", "sg-2"]}
+            return {
+                "network_id": "net-1",
+                "security_group_ids": ["sg-1", "sg-2"],
+                "fixed_ips": [{"subnet_id": "subnet-1", "ip_address": "10.0.0.10"}],
+            }
 
     class FakeNetworkAPI:
         @staticmethod
@@ -380,28 +389,40 @@ def test_clone_instance_creates_ports_volumes_server_and_floating_ip(monkeypatch
     result = resource_helpers.clone_instance(
         "vm-1",
         new_name="vm-1-clone",
+        flavor_id="flavor-2",
+        key_name="override-key",
+        server_group_id="group-7",
         clone_data_volumes=True,
         create_floating_ip=True,
         power_on=True,
         keep_metadata=True,
+        user_data_mode="replace",
+        user_data_text="#cloud-config\nhostname: clone-a\n",
+        port_overrides=[{"source_port_id": "port-1", "network_id": "net-2", "subnet_id": "subnet-9", "fixed_ip": "10.0.9.25"}],
         auth=None,
     )
 
     assert result["server_id"] == "clone-vm-1"
     assert result["server_name"] == "vv-vm-1-clone"
     assert result["floating_ip_id"] == "fip-clone-1"
-    assert created_ports[0]["network_id"] == "net-1"
+    assert created_ports[0]["network_id"] == "net-2"
     assert created_ports[0]["name"].startswith("vv-vm-1-clone-")
     assert created_ports[0]["security_group_ids"] == ["sg-1", "sg-2"]
+    assert created_ports[0]["fixed_ips"] == [{"subnet_id": "subnet-9", "ip_address": "10.0.9.25"}]
     assert [item["source_volid"] for item in created_volumes] == ["root-vol", "data-vol"]
     assert created_volumes[0]["name"].startswith("vv-vm-1-clone-")
     assert created_server["name"] == "vv-vm-1-clone"
-    assert created_server["flavor_id"] == "flavor-1"
+    assert created_server["flavor_id"] == "flavor-2"
+    assert created_server["key_name"] == "override-key"
+    assert created_server["scheduler_hints"] == {"group": "group-7"}
     assert created_server["networks"] == [{"port": "clone-port-1"}]
+    assert created_server["user_data"] == "I2Nsb3VkLWNvbmZpZwpob3N0bmFtZTogY2xvbmUtYQo="
     assert created_server["block_device_mapping_v2"][0]["uuid"] == "clone-root-vol"
     assert created_server["block_device_mapping_v2"][1]["uuid"] == "clone-data-vol"
     assert created_ips[0]["floating_network_id"] == "ext-net-1"
     assert created_ips[0]["port_id"] == "clone-port-1"
+    assert result["flavor_id"] == "flavor-2"
+    assert result["user_data_mode"] == "replace"
 
 
 def test_clone_instance_requires_resolved_flavor(monkeypatch):

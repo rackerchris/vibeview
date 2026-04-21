@@ -1161,6 +1161,77 @@ body.no-hints .vmware-ref-card { display: none !important; }
 .finding.warn .finding-mark { background: #fff3cd; color: #8d6e00; }
 .finding.bad .finding-mark  { background: #ffcdd2; color: var(--red); }
 .finding strong { display: block; margin-bottom: 2px; }
+.finding.compact {
+  padding: 5px 7px;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+.finding.compact .finding-mark {
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+  margin-top: 0;
+}
+.finding.compact strong {
+  display: inline;
+  margin: 0 4px 0 0;
+}
+.clone-preflight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+.clone-planner-topgrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.8fr);
+  gap: 12px;
+}
+.clone-compare-table td {
+  vertical-align: top;
+}
+.clone-compare-table td:nth-child(1) { width: 18%; }
+.clone-compare-table td:nth-child(2),
+.clone-compare-table td:nth-child(3) { width: 41%; }
+.clone-compare-table td { line-height: 1.45; }
+.clone-port-edit-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+.clone-port-edit-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: #fafbfd;
+}
+.clone-port-edit-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.clone-port-edit-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+.clone-context-network-table th:nth-child(1),
+.clone-context-network-table td:nth-child(1) { width: 14%; }
+.clone-context-network-table th:nth-child(2),
+.clone-context-network-table td:nth-child(2) { width: 22%; }
+.clone-context-network-table th:nth-child(3),
+.clone-context-network-table td:nth-child(3) { width: 22%; }
+.clone-context-network-table th:nth-child(4),
+.clone-context-network-table td:nth-child(4) { width: 18%; }
+.clone-context-network-table th:nth-child(5),
+.clone-context-network-table td:nth-child(5) { width: 12%; }
+.clone-context-network-table th:nth-child(6),
+.clone-context-network-table td:nth-child(6) { width: 12%; }
+@media (max-width: 900px) {
+  .clone-preflight-grid { grid-template-columns: 1fr; }
+  .clone-planner-topgrid { grid-template-columns: 1fr; }
+}
 .hint-toggle {
   background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
   color: #b0bec5; padding: 3px 9px; border-radius: 3px; font-size: 11px;
@@ -2323,11 +2394,15 @@ body.no-hints .vmware-ref-card { display: none !important; }
   display: flex;
 }
 .clone-workflow-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
   padding: 8px 14px;
   font-size: 12px;
   color: var(--dim);
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
+  font-family: inherit;
 }
 .clone-workflow-tab.active {
   color: var(--blue);
@@ -2339,6 +2414,54 @@ body.no-hints .vmware-ref-card { display: none !important; }
   gap: 6px;
   font-size: 12px;
   color: var(--text);
+}
+.clone-inline-select,
+.clone-inline-input,
+.clone-userdata-text {
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--text) 22%, var(--line));
+  border-radius: 10px;
+  background: var(--white);
+  color: var(--text);
+}
+.clone-inline-select,
+.clone-inline-input {
+  min-height: 34px;
+  padding: 6px 10px;
+}
+.clone-inline-input.invalid {
+  border-color: var(--red);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--red) 24%, transparent);
+}
+.clone-inline-error {
+  margin-top: 4px;
+  color: var(--red);
+  font-size: 11px;
+}
+.clone-userdata-text {
+  min-height: 140px;
+  padding: 10px 12px;
+  resize: vertical;
+  font: 12px/1.45 "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 8%, transparent);
+}
+.clone-sg-chiplist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.clone-sg-chip {
+  border: 1px solid color-mix(in srgb, var(--text) 18%, var(--line));
+  background: color-mix(in srgb, var(--blue) 8%, white);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.clone-sg-chip span {
+  color: var(--dim);
 }
 .project-clone-check {
   display: flex;

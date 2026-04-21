@@ -20,6 +20,9 @@ from ..resource_helpers import (
     CloneWorkflowError,
     clone_instance,
     get_floating_ips,
+    get_flavors,
+    get_keypairs,
+    get_server_groups,
     get_port_detail,
     get_ports,
     get_project_instances,
@@ -412,6 +415,7 @@ async def api_project_quota_update(project_id: str, request: Request):
 @router.get("/api/instances/{instance_id}")
 async def api_instance_detail(instance_id: str, request: Request):
     session = _require_session_record()(request)
+    skip_ovn = str(request.query_params.get("skip_ovn") or "").strip().lower() in {"1", "true", "yes", "on"}
     try:
         data = await _run_with_timeout(openstack_ops.get_instance_network_detail, instance_id, session.server.openstack_auth)
         loop = asyncio.get_running_loop()
@@ -420,7 +424,7 @@ async def api_instance_detail(instance_id: str, request: Request):
             payload = dict(port)
             ovn = None
             ovn_error = None
-            if session.server.k8s_auth and port.get("id") and port.get("network_id"):
+            if not skip_ovn and session.server.k8s_auth and port.get("id") and port.get("network_id"):
                 try:
                     ovn = await loop.run_in_executor(
                         None,
@@ -446,6 +450,22 @@ async def api_instance_detail(instance_id: str, request: Request):
         return {"instance": None, "error": str(exc), "api_issue": build_api_issue("Nova", f"GET /servers/{instance_id}", exc)}
 
 
+@router.get("/api/instances/{instance_id}/clone-source")
+async def api_instance_clone_source_detail(instance_id: str, request: Request):
+    session = _require_session_record()(request)
+    try:
+        data = await _run_with_timeout(openstack_ops.get_instance_network_detail, instance_id, session.server.openstack_auth)
+        return {"instance": data, "error": None, "api_issue": None}
+    except TimeoutError:
+        return {
+            "instance": None,
+            "error": f"Timed out after {_RESOURCE_DETAIL_TIMEOUT_SECONDS:.0f}s while loading clone source details",
+            "api_issue": None,
+        }
+    except Exception as exc:
+        return {"instance": None, "error": str(exc), "api_issue": build_api_issue("Nova", f"GET clone source /servers/{instance_id}", exc)}
+
+
 @router.get("/api/floating-ips")
 async def api_floating_ips(request: Request):
     session = _require_session_record()(request)
@@ -455,6 +475,39 @@ async def api_floating_ips(request: Request):
         return {"floating_ips": data, "error": None, "api_issue": None}
     except Exception as exc:
         return {"floating_ips": [], "error": str(exc), "api_issue": build_api_issue("Neutron", "GET /v2.0/floatingips", exc)}
+
+
+@router.get("/api/flavors")
+async def api_flavors(request: Request):
+    session = _require_session_record()(request)
+    loop = asyncio.get_running_loop()
+    try:
+        data = await loop.run_in_executor(None, get_flavors, session.server.openstack_auth)
+        return {"flavors": data, "error": None, "api_issue": None}
+    except Exception as exc:
+        return {"flavors": [], "error": str(exc), "api_issue": build_api_issue("Nova", "GET /flavors/detail", exc)}
+
+
+@router.get("/api/keypairs")
+async def api_keypairs(request: Request):
+    session = _require_session_record()(request)
+    loop = asyncio.get_running_loop()
+    try:
+        data = await loop.run_in_executor(None, get_keypairs, session.server.openstack_auth)
+        return {"keypairs": data, "error": None, "api_issue": None}
+    except Exception as exc:
+        return {"keypairs": [], "error": str(exc), "api_issue": build_api_issue("Nova", "GET /os-keypairs", exc)}
+
+
+@router.get("/api/server-groups")
+async def api_server_groups(request: Request):
+    session = _require_session_record()(request)
+    loop = asyncio.get_running_loop()
+    try:
+        data = await loop.run_in_executor(None, get_server_groups, session.server.openstack_auth)
+        return {"server_groups": data, "error": None, "api_issue": None}
+    except Exception as exc:
+        return {"server_groups": [], "error": str(exc), "api_issue": build_api_issue("Nova", "GET /os-server-groups", exc)}
 
 
 @router.get("/api/ports")
@@ -530,18 +583,32 @@ async def api_instance_clone(instance_id: str, request: Request):
     session = _require_session_record()(request)
     payload = await request.json()
     new_name = str(payload.get("new_name") or "").strip()
+    flavor_id = str(payload.get("flavor_id") or "").strip()
+    raw_key_name = payload.get("key_name", None)
+    key_name = None if raw_key_name is None else str(raw_key_name)
+    raw_server_group_id = payload.get("server_group_id", None)
+    server_group_id = None if raw_server_group_id is None else str(raw_server_group_id)
     clone_data_volumes = bool(payload.get("clone_data_volumes", True))
     create_floating_ip = bool(payload.get("create_floating_ip", True))
     power_on = bool(payload.get("power_on", True))
     keep_metadata = bool(payload.get("keep_metadata", True))
+    user_data_mode = str(payload.get("user_data_mode") or "preserve").strip().lower() or "preserve"
+    user_data_text = str(payload.get("user_data_text") or "")
+    raw_port_overrides = payload.get("port_overrides")
+    port_overrides = raw_port_overrides if isinstance(raw_port_overrides, list) else []
     _LOGGER.info(
-        "clone api request instance_id=%s new_name=%s clone_data_volumes=%s create_floating_ip=%s power_on=%s keep_metadata=%s",
+        "clone api request instance_id=%s new_name=%s flavor_id=%s key_name=%s server_group_id=%s clone_data_volumes=%s create_floating_ip=%s power_on=%s keep_metadata=%s user_data_mode=%s port_override_count=%s",
         instance_id,
         new_name,
+        flavor_id,
+        key_name,
+        server_group_id,
         clone_data_volumes,
         create_floating_ip,
         power_on,
         keep_metadata,
+        user_data_mode,
+        len(port_overrides),
     )
     existing = _clone_status(instance_id)
     if existing and str(existing.get("state") or "") == "running":
@@ -589,10 +656,16 @@ async def api_instance_clone(instance_id: str, request: Request):
             data = clone_instance(
                 instance_id,
                 new_name=new_name,
+                flavor_id=flavor_id,
+                key_name=key_name,
+                server_group_id=server_group_id,
                 clone_data_volumes=clone_data_volumes,
                 create_floating_ip=create_floating_ip,
                 power_on=power_on,
                 keep_metadata=keep_metadata,
+                user_data_mode=user_data_mode,
+                user_data_text=user_data_text,
+                port_overrides=port_overrides,
                 progress_cb=progress_cb,
                 auth=session.server.openstack_auth,
             )

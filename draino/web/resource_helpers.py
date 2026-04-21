@@ -1,7 +1,9 @@
 """OpenStack-backed resource helpers for the web UI."""
 from __future__ import annotations
 
+import base64
 from collections import defaultdict
+import ipaddress
 import logging
 import time
 from urllib.parse import urlparse
@@ -66,6 +68,71 @@ def _project_names(conn) -> dict[str, str]:
     except Exception:
         return names
     return names
+
+
+def get_flavors(auth: openstack_ops.OpenStackAuth | None) -> list[dict]:
+    """Return all visible Nova flavors for clone and create workflows."""
+    conn = openstack_ops._conn(auth=auth)
+    result: list[dict] = []
+    try:
+        flavors = list(conn.compute.flavors())
+    except Exception:
+        return result
+    for flavor in flavors:
+        data = _obj_dict(flavor)
+        result.append({
+            "id": getattr(flavor, "id", None) or data.get("id") or "",
+            "name": getattr(flavor, "name", None) or data.get("name") or "",
+            "vcpus": getattr(flavor, "vcpus", None) or data.get("vcpus"),
+            "ram_mb": getattr(flavor, "ram", None) or data.get("ram"),
+            "disk_gb": getattr(flavor, "disk", None) or data.get("disk"),
+            "ephemeral_gb": getattr(flavor, "ephemeral", None) or data.get("ephemeral"),
+            "swap_mb": getattr(flavor, "swap", None) or data.get("swap"),
+        })
+    result.sort(key=lambda item: (item["name"], item["id"]))
+    return result
+
+
+def get_keypairs(auth: openstack_ops.OpenStackAuth | None) -> list[dict]:
+    """Return all visible Nova keypairs for clone and create workflows."""
+    conn = openstack_ops._conn(auth=auth)
+    result: list[dict] = []
+    try:
+        keypairs = list(conn.compute.keypairs())
+    except Exception:
+        return result
+    for keypair in keypairs:
+        data = _obj_dict(keypair)
+        result.append({
+            "name": getattr(keypair, "name", None) or data.get("name") or "",
+            "type": getattr(keypair, "type", None) or data.get("type") or "",
+            "fingerprint": getattr(keypair, "fingerprint", None) or data.get("fingerprint") or "",
+        })
+    result.sort(key=lambda item: (item["name"], item["fingerprint"]))
+    return result
+
+
+def get_server_groups(auth: openstack_ops.OpenStackAuth | None) -> list[dict]:
+    """Return visible Nova server groups for scheduler-hint selection."""
+    conn = openstack_ops._conn(auth=auth)
+    result: list[dict] = []
+    try:
+        groups = list(conn.compute.server_groups())
+    except Exception:
+        return result
+    for group in groups:
+        data = _obj_dict(group)
+        policies = list(getattr(group, "policies", None) or data.get("policies") or [])
+        result.append({
+            "id": getattr(group, "id", None) or data.get("id") or "",
+            "name": getattr(group, "name", None) or data.get("name") or "",
+            "policies": policies,
+            "policy": policies[0] if policies else "",
+            "members": list(getattr(group, "members", None) or data.get("members") or []),
+            "project_id": getattr(group, "project_id", None) or data.get("project_id") or "",
+        })
+    result.sort(key=lambda item: (item["name"], item["id"]))
+    return result
 
 
 def _current_membership_project_ids(conn) -> set[str]:
@@ -2870,10 +2937,13 @@ def _compute_create_server(conn, payload: dict) -> dict:
     fn = getattr(compute, "create_server", None) if compute is not None else None
     if callable(fn):
         attrs = {**(payload.get("server", {}) or {})}
+        scheduler_hints = payload.get("os:scheduler_hints") or payload.get("scheduler_hints") or {}
         if "flavorRef" in attrs:
             attrs["flavor_id"] = attrs.pop("flavorRef")
         if "imageRef" in attrs:
             attrs["image_id"] = attrs.pop("imageRef")
+        if scheduler_hints:
+            attrs["scheduler_hints"] = scheduler_hints
         server = fn(**attrs)
         data = _obj_dict(server)
         return {"id": getattr(server, "id", None) or data.get("id") or ""}
@@ -2950,14 +3020,81 @@ def _create_port_clone(conn, source_port, name_prefix: str, project_id: str) -> 
     }
 
 
+def _clone_port_override_map(overrides: list[dict] | None) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    for item in overrides or []:
+        if not isinstance(item, dict):
+            continue
+        source_port_id = str(item.get("source_port_id") or "").strip()
+        if not source_port_id:
+            continue
+        fixed_ip = str(item.get("fixed_ip") or "").strip()
+        if fixed_ip:
+            try:
+                ipaddress.ip_address(fixed_ip)
+            except ValueError as exc:
+                raise ValueError(f"Invalid fixed IP override '{fixed_ip}' for source port {source_port_id}") from exc
+        result[source_port_id] = {
+            "network_id": str(item.get("network_id") or "").strip(),
+            "subnet_id": str(item.get("subnet_id") or "").strip(),
+            "fixed_ip": fixed_ip,
+            "security_group_ids": [str(group_id).strip() for group_id in (item.get("security_group_ids") or []) if str(group_id).strip()],
+        }
+    return result
+
+
+def _create_port_clone_with_override(conn, source_port, name_prefix: str, project_id: str, override: dict | None) -> dict:
+    source_data = _obj_dict(source_port)
+    source_port_id = getattr(source_port, "id", None) or source_data.get("id") or ""
+    attrs = {
+        "name": f"{name_prefix}-{getattr(source_port, 'name', None) or source_data.get('name') or 'port'}".strip("-"),
+        "network_id": str((override or {}).get("network_id") or getattr(source_port, "network_id", None) or source_data.get("network_id") or "").strip(),
+        "project_id": project_id,
+    }
+    security_groups = list((override or {}).get("security_group_ids") or _port_security_groups(source_port))
+    if security_groups:
+        attrs["security_group_ids"] = security_groups
+    subnet_id = str((override or {}).get("subnet_id") or "").strip()
+    fixed_ip = str((override or {}).get("fixed_ip") or "").strip()
+    if fixed_ip:
+        fixed_ip_entry = {"ip_address": fixed_ip}
+        if subnet_id:
+            fixed_ip_entry["subnet_id"] = subnet_id
+        attrs["fixed_ips"] = [fixed_ip_entry]
+    elif subnet_id:
+        attrs["fixed_ips"] = [{"subnet_id": subnet_id}]
+    try:
+        port = conn.network.create_port(**attrs)
+    except TypeError:
+        if "security_group_ids" in attrs:
+            attrs["security_groups"] = attrs.pop("security_group_ids")
+        port = conn.network.create_port(**attrs)
+    port_data = _obj_dict(port)
+    return {
+        "id": getattr(port, "id", None) or port_data.get("id") or "",
+        "name": getattr(port, "name", None) or port_data.get("name") or "",
+        "network_id": attrs["network_id"],
+        "security_group_ids": security_groups,
+        "source_port_id": source_port_id,
+        "subnet_id": subnet_id,
+        "fixed_ip": fixed_ip,
+    }
+
+
 def clone_instance(
     instance_id: str,
     *,
     new_name: str,
+    flavor_id: str = "",
+    key_name: str | None = None,
+    server_group_id: str | None = None,
     clone_data_volumes: bool = True,
     create_floating_ip: bool = True,
     power_on: bool = True,
     keep_metadata: bool = True,
+    user_data_mode: str = "preserve",
+    user_data_text: str = "",
+    port_overrides: list[dict] | None = None,
     progress_cb=None,
     auth: openstack_ops.OpenStackAuth | None = None,
 ) -> dict:
@@ -2974,13 +3111,18 @@ def clone_instance(
             progress_cb(step_key, label, detail, state, extra)
 
     _CLONE_LOG.info(
-        "clone requested instance_id=%s new_name=%s clone_data_volumes=%s create_floating_ip=%s power_on=%s keep_metadata=%s",
+        "clone requested instance_id=%s new_name=%s flavor_id=%s key_name=%s server_group_id=%s clone_data_volumes=%s create_floating_ip=%s power_on=%s keep_metadata=%s user_data_mode=%s port_override_count=%s",
         instance_id,
         new_name,
+        flavor_id,
+        key_name,
+        server_group_id,
         clone_data_volumes,
         create_floating_ip,
         power_on,
         keep_metadata,
+        user_data_mode,
+        len(port_overrides or []),
     )
     conn = openstack_ops._conn(auth=auth)
     volume_proxy = getattr(conn, "block_storage", None) or getattr(conn, "volume", None)
@@ -2996,20 +3138,33 @@ def clone_instance(
     requested_name = _clone_prefixed_name(requested_name, "clone")
     project_id = openstack_ops._server_project_id(source) or getattr(conn, "current_project_id", None) or ""
     availability_zone = getattr(source, "availability_zone", None) or source_data.get("OS-EXT-AZ:availability_zone") or ""
-    key_name = getattr(source, "key_name", None) or source_data.get("key_name") or ""
+    source_key_name = getattr(source, "key_name", None) or source_data.get("key_name") or ""
+    selected_key_name = source_key_name if key_name is None else str(key_name or "").strip()
+    selected_server_group_id = None if server_group_id is None else str(server_group_id or "").strip()
     metadata = dict(getattr(source, "metadata", None) or source_data.get("metadata") or {}) if keep_metadata else {}
     flavor_ref = getattr(source, "flavor", None) or source_data.get("flavor") or {}
     flavor = openstack_ops._resolve_flavor_data(conn, flavor_ref)
-    flavor_id = (
-        flavor.get("id")
+    selected_flavor_id = str(flavor_id or "").strip()
+    resolved_flavor_id = (
+        selected_flavor_id
+        or flavor.get("id")
         or getattr(flavor_ref, "id", None)
         or (flavor_ref.get("id") if isinstance(flavor_ref, dict) else None)
         or ""
     )
-    if not flavor_id or not flavor:
+    if not resolved_flavor_id or not flavor:
         raise RuntimeError("Source flavor could not be resolved for clone preflight")
-    _CLONE_LOG.debug("clone step=source_resolved instance_id=%s flavor_id=%s", instance_id, flavor_id)
-    progress("resolve_source", "Resolve Source Topology", f"Resolved flavor {flavor_id} and source metadata.")
+    source_user_data = source_data.get("OS-EXT-SRV-ATTR:user_data")
+    source_user_data_visible = "OS-EXT-SRV-ATTR:user_data" in source_data and source_user_data is not None
+    normalized_user_data_mode = str(user_data_mode or "preserve").strip().lower() or "preserve"
+    if normalized_user_data_mode not in {"preserve", "replace", "none"}:
+        raise ValueError(f"Unsupported user_data_mode '{user_data_mode}'")
+    port_override_map = _clone_port_override_map(port_overrides)
+    _CLONE_LOG.debug("clone step=source_resolved instance_id=%s flavor_id=%s", instance_id, resolved_flavor_id)
+    progress("resolve_source", "Resolve Source Topology", f"Resolved flavor {resolved_flavor_id} and source metadata.", "running", {
+        "selected_flavor_id": resolved_flavor_id,
+        "user_data_mode": normalized_user_data_mode,
+    })
 
     source_ports = list(conn.network.ports(device_id=instance_id))
     if not source_ports:
@@ -3038,7 +3193,13 @@ def clone_instance(
             "created_resources": created_resources_snapshot(),
         })
         _CLONE_LOG.debug("clone step=create_ports start instance_id=%s", instance_id)
-        cloned_ports = [_create_port_clone(conn, port, requested_name, project_id) for port in source_ports]
+        cloned_ports = []
+        for port in source_ports:
+            port_data = _obj_dict(port)
+            source_port_id = getattr(port, "id", None) or port_data.get("id") or ""
+            cloned_ports.append(
+                _create_port_clone_with_override(conn, port, requested_name, project_id, port_override_map.get(source_port_id))
+            )
         created_ports = [item["id"] for item in cloned_ports if item.get("id")]
         _CLONE_LOG.debug("clone step=create_ports complete instance_id=%s created_ports=%s", instance_id, created_ports)
         progress("create_ports", "Clone Neutron Ports", f"Created {len(created_ports)} port(s) for the clone: {', '.join(created_ports) or 'none'}.", "running", {
@@ -3169,7 +3330,7 @@ def clone_instance(
         server_payload = {
             "server": {
                 "name": requested_name,
-                "flavorRef": flavor_id,
+                "flavorRef": resolved_flavor_id,
                 "networks": [{"port": item["id"]} for item in cloned_ports],
             }
         }
@@ -3181,8 +3342,20 @@ def clone_instance(
             server_payload["server"]["metadata"] = metadata
         if availability_zone:
             server_payload["server"]["availability_zone"] = availability_zone
-        if key_name:
-            server_payload["server"]["key_name"] = key_name
+        if selected_key_name:
+            server_payload["server"]["key_name"] = selected_key_name
+        if selected_server_group_id:
+            server_payload["os:scheduler_hints"] = {"group": selected_server_group_id}
+        if normalized_user_data_mode == "preserve":
+            if source_user_data_visible and isinstance(source_user_data, str):
+                server_payload["server"]["user_data"] = source_user_data
+            else:
+                warnings.append("Source user_data is not readable to this user and could not be preserved.")
+        elif normalized_user_data_mode == "replace":
+            if str(user_data_text or ""):
+                server_payload["server"]["user_data"] = base64.b64encode(str(user_data_text).encode("utf-8")).decode("ascii")
+            else:
+                warnings.append("New user_data was requested but empty, so no user_data was sent to Nova.")
 
         progress("create_server", "Create Nova Server", f"Creating cloned server {requested_name}.", "running", {
             "created_resources": created_resources_snapshot(),
@@ -3281,13 +3454,15 @@ def clone_instance(
             "server_id": created_server_id,
             "server_name": requested_name,
             "status": "created",
-            "flavor_id": flavor_id,
+            "flavor_id": resolved_flavor_id,
             "ports": created_ports,
             "volumes": created_volumes,
             "snapshot_image_id": snapshot_image_id or None,
             "floating_ip_id": created_floating_ip_id or None,
             "floating_ip_requested": bool(create_floating_ip),
             "power_on": bool(power_on),
+            "user_data_mode": normalized_user_data_mode,
+            "user_data_preserved": bool(normalized_user_data_mode == "preserve" and source_user_data_visible and isinstance(source_user_data, str)),
             "warnings": warnings,
         }
     except Exception as exc:

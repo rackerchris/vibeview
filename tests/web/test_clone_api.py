@@ -21,14 +21,20 @@ def test_instance_clone_endpoint_requests_action(monkeypatch):
 
     captured = {}
 
-    def fake_clone_instance(instance_id, *, new_name, clone_data_volumes=True, create_floating_ip=True, power_on=True, keep_metadata=True, progress_cb=None, auth=None):
+    def fake_clone_instance(instance_id, *, new_name, flavor_id="", key_name="", server_group_id="", clone_data_volumes=True, create_floating_ip=True, power_on=True, keep_metadata=True, user_data_mode="preserve", user_data_text="", port_overrides=None, progress_cb=None, auth=None):
         captured.update({
             "instance_id": instance_id,
             "new_name": new_name,
+            "flavor_id": flavor_id,
+            "key_name": key_name,
+            "server_group_id": server_group_id,
             "clone_data_volumes": clone_data_volumes,
             "create_floating_ip": create_floating_ip,
             "power_on": power_on,
             "keep_metadata": keep_metadata,
+            "user_data_mode": user_data_mode,
+            "user_data_text": user_data_text,
+            "port_overrides": port_overrides,
         })
         if progress_cb:
             progress_cb("create_server", "Create Nova Server", "Creating the cloned server.")
@@ -73,10 +79,16 @@ def test_instance_clone_endpoint_requests_action(monkeypatch):
         assert login.status_code == 200
         resp = client.post("/api/instances/vm-1/clone", json={
             "new_name": "vm-1-clone",
+            "flavor_id": "flavor-2",
+            "key_name": "default-key",
+            "server_group_id": "group-2",
             "clone_data_volumes": True,
             "create_floating_ip": False,
             "power_on": False,
             "keep_metadata": True,
+            "user_data_mode": "replace",
+            "user_data_text": "#cloud-config\nhostname: clone-1\n",
+            "port_overrides": [{"source_port_id": "port-1", "network_id": "net-2", "fixed_ip": "10.0.2.55"}],
         })
 
     body = resp.json()
@@ -88,10 +100,16 @@ def test_instance_clone_endpoint_requests_action(monkeypatch):
     assert captured == {
         "instance_id": "vm-1",
         "new_name": "vm-1-clone",
+        "flavor_id": "flavor-2",
+        "key_name": "default-key",
+        "server_group_id": "group-2",
         "clone_data_volumes": True,
         "create_floating_ip": False,
         "power_on": False,
         "keep_metadata": True,
+        "user_data_mode": "replace",
+        "user_data_text": "#cloud-config\nhostname: clone-1\n",
+        "port_overrides": [{"source_port_id": "port-1", "network_id": "net-2", "fixed_ip": "10.0.2.55"}],
     }
 
 
@@ -106,7 +124,7 @@ def test_instance_clone_status_endpoint_reports_last_clone_state(monkeypatch):
     monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
     monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
 
-    def fake_clone_instance(instance_id, *, new_name, clone_data_volumes=True, create_floating_ip=True, power_on=True, keep_metadata=True, progress_cb=None, auth=None):
+    def fake_clone_instance(instance_id, *, new_name, flavor_id="", key_name="", server_group_id="", clone_data_volumes=True, create_floating_ip=True, power_on=True, keep_metadata=True, user_data_mode="preserve", user_data_text="", port_overrides=None, progress_cb=None, auth=None):
         if progress_cb:
             progress_cb("create_ports", "Clone Neutron Ports", "Created 1 port.")
         return {
@@ -216,7 +234,7 @@ def test_instance_clone_status_reports_cleanup_details_on_failure(monkeypatch):
     monkeypatch.setattr(web_server.openstack_ops, "_conn", lambda auth=None: FakeConn())
     monkeypatch.setattr(web_server.openstack_ops, "get_current_role_names", lambda auth=None: ["admin"])
 
-    def fake_clone_instance(instance_id, *, new_name, clone_data_volumes=True, create_floating_ip=True, power_on=True, keep_metadata=True, progress_cb=None, auth=None):
+    def fake_clone_instance(instance_id, *, new_name, flavor_id="", key_name="", server_group_id="", clone_data_volumes=True, create_floating_ip=True, power_on=True, keep_metadata=True, user_data_mode="preserve", user_data_text="", port_overrides=None, progress_cb=None, auth=None):
         if progress_cb:
             progress_cb("create_server", "Create Nova Server", "Nova created the clone server record.")
         raise resource_api.CloneWorkflowError(

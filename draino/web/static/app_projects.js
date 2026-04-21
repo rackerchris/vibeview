@@ -5,12 +5,34 @@ let projectCloneStatusTimer = null;
 const projectCloneState = {
   open: false,
   mode: 'planner',
+  workflowTab: 'workflow',
   source: null,
+  sourceLoading: false,
+  sourceLoadAttempted: false,
+  flavors: [],
+  flavorsLoaded: false,
+  flavorsLoading: false,
+  flavorsError: '',
+  keypairs: [],
+  keypairsLoaded: false,
+  keypairsLoading: false,
+  keypairsError: '',
+  serverGroups: [],
+  serverGroupsLoaded: false,
+  serverGroupsLoading: false,
+  serverGroupsError: '',
   newName: '',
+  flavorId: '',
+  keyName: '',
+  serverGroupId: '',
   cloneDataVolumes: true,
   createFloatingIp: true,
   powerOn: true,
   keepMetadata: true,
+  userDataMode: 'preserve',
+  userDataText: '',
+  selectedSecurityGroupIds: [],
+  portOverrides: {},
   submitting: false,
   requestId: '',
   activeCloneLabel: '',
@@ -21,12 +43,36 @@ const projectCloneState = {
   tone: 'info',
 };
 
+const PROJECT_CLONE_SOURCE_TIMEOUT_MS = 15000;
+
 function projectCloneStatusState() {
   return String(projectCloneState.status?.state || '').toLowerCase();
 }
 
 function isProjectCloneActive() {
   return ['queued', 'running'].includes(projectCloneStatusState());
+}
+
+function projectCloneProjectNetworks() {
+  const networking = projectInventory('networking') || {};
+  return Array.isArray(networking.networks) ? networking.networks : [];
+}
+
+function projectCloneFlavorOptions() {
+  return Array.isArray(projectCloneState.flavors) ? projectCloneState.flavors : [];
+}
+
+function projectCloneKeypairOptions() {
+  return Array.isArray(projectCloneState.keypairs) ? projectCloneState.keypairs : [];
+}
+
+function projectCloneServerGroupOptions() {
+  return Array.isArray(projectCloneState.serverGroups) ? projectCloneState.serverGroups : [];
+}
+
+function projectCloneSecurityGroupOptions() {
+  const security = projectInventory('security') || {};
+  return Array.isArray(security.security_groups) ? security.security_groups : [];
 }
 
 function projectViewLabel(name = activeProjectView) {
@@ -630,6 +676,386 @@ function projectCloneVolumeRows(instance) {
   });
 }
 
+async function ensureProjectCloneFlavorsLoaded(force = false) {
+  if ((projectCloneState.flavorsLoaded && !force) || projectCloneState.flavorsLoading) return;
+  projectCloneState.flavorsLoading = true;
+  projectCloneState.flavorsError = '';
+  if (projectCloneState.open) renderProjectCloneOverlay();
+  try {
+    const resp = await fetch('/api/flavors');
+    const json = await resp.json();
+    if (json.api_issue) recordApiIssue(json.api_issue);
+    else recordApiSuccess('Nova');
+    if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
+    projectCloneState.flavors = Array.isArray(json.flavors) ? json.flavors : [];
+    projectCloneState.flavorsLoaded = true;
+  } catch (err) {
+    projectCloneState.flavors = [];
+    projectCloneState.flavorsError = String(err);
+  } finally {
+    projectCloneState.flavorsLoading = false;
+    if (projectCloneState.open) renderProjectCloneOverlay();
+  }
+}
+
+async function ensureProjectCloneKeypairsLoaded(force = false) {
+  if ((projectCloneState.keypairsLoaded && !force) || projectCloneState.keypairsLoading) return;
+  projectCloneState.keypairsLoading = true;
+  projectCloneState.keypairsError = '';
+  if (projectCloneState.open) renderProjectCloneOverlay();
+  try {
+    const resp = await fetch('/api/keypairs');
+    const json = await resp.json();
+    if (json.api_issue) recordApiIssue(json.api_issue);
+    else recordApiSuccess('Nova');
+    if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
+    projectCloneState.keypairs = Array.isArray(json.keypairs) ? json.keypairs : [];
+    projectCloneState.keypairsLoaded = true;
+  } catch (err) {
+    projectCloneState.keypairs = [];
+    projectCloneState.keypairsError = String(err);
+  } finally {
+    projectCloneState.keypairsLoading = false;
+    if (projectCloneState.open) renderProjectCloneOverlay();
+  }
+}
+
+async function ensureProjectCloneServerGroupsLoaded(force = false) {
+  if ((projectCloneState.serverGroupsLoaded && !force) || projectCloneState.serverGroupsLoading) return;
+  projectCloneState.serverGroupsLoading = true;
+  projectCloneState.serverGroupsError = '';
+  if (projectCloneState.open) renderProjectCloneOverlay();
+  try {
+    const resp = await fetch('/api/server-groups');
+    const json = await resp.json();
+    if (json.api_issue) recordApiIssue(json.api_issue);
+    else recordApiSuccess('Nova');
+    if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
+    projectCloneState.serverGroups = Array.isArray(json.server_groups) ? json.server_groups : [];
+    projectCloneState.serverGroupsLoaded = true;
+  } catch (err) {
+    projectCloneState.serverGroups = [];
+    projectCloneState.serverGroupsError = String(err);
+  } finally {
+    projectCloneState.serverGroupsLoading = false;
+    if (projectCloneState.open) renderProjectCloneOverlay();
+  }
+}
+
+function projectCloneDefaultFlavorId(instance) {
+  return String(instance?.flavor?.id || '').trim();
+}
+
+function projectCloneDefaultKeyName(instance) {
+  return String(instance?.key_name || '').trim();
+}
+
+function projectCloneDefaultServerGroupId(instance) {
+  return '';
+}
+
+function projectCloneUserDataReadable(instance) {
+  return !!instance?.user_data_visible;
+}
+
+function projectCloneUserDataPresent(instance) {
+  return !!instance?.user_data_present;
+}
+
+function projectClonePortOverride(sourcePortId) {
+  return projectCloneState.portOverrides?.[sourcePortId] || {};
+}
+
+function projectClonePortTargetNetworkId(port) {
+  return String(projectClonePortOverride(port.id).networkId || port.network_id || '').trim();
+}
+
+function projectClonePortTargetSubnetId(port) {
+  return String(projectClonePortOverride(port.id).subnetId || '').trim();
+}
+
+function projectClonePortFixedIp(port) {
+  return String(projectClonePortOverride(port.id).fixedIp || '').trim();
+}
+
+function projectCloneTargetNetworkName(networkId) {
+  const match = projectCloneProjectNetworks().find((item) => item.id === networkId);
+  return match?.name || networkId || '—';
+}
+
+function projectCloneKeypairLabel(keypair) {
+  const name = String(keypair?.name || '').trim();
+  const fingerprint = String(keypair?.fingerprint || '').trim();
+  if (name && fingerprint) return `${name} (${fingerprint})`;
+  return name || fingerprint || 'No key pair';
+}
+
+function projectCloneServerGroupLabel(group) {
+  const name = String(group?.name || '').trim();
+  const id = String(group?.id || '').trim();
+  const policy = String(group?.policy || (Array.isArray(group?.policies) ? group.policies[0] : '') || '').trim();
+  const base = name && id ? `${name} (${id})` : (name || id || 'No server group');
+  return policy ? `${base} · ${policy}` : base;
+}
+
+function projectCloneIsValidIpv4(value) {
+  const parts = String(value || '').trim().split('.');
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    if (!/^\d+$/.test(part)) return false;
+    if (part.length > 1 && part.startsWith('0')) return false;
+    const num = Number(part);
+    return num >= 0 && num <= 255;
+  });
+}
+
+function projectCloneIsValidIpv6(value) {
+  const candidate = String(value || '').trim();
+  if (!candidate || !candidate.includes(':')) return false;
+  try {
+    const normalized = new URL(`http://[${candidate}]/`).hostname;
+    return normalized.toLowerCase() === candidate.toLowerCase();
+  } catch (_) {
+    return false;
+  }
+}
+
+function projectClonePortIpValidation(port) {
+  const value = projectClonePortFixedIp(port);
+  if (!value) return '';
+  return (projectCloneIsValidIpv4(value) || projectCloneIsValidIpv6(value))
+    ? ''
+    : 'Enter a valid IPv4 or IPv6 address.';
+}
+
+function projectCloneValidationErrors(instance) {
+  const errors = [];
+  for (const port of (instance?.ports || [])) {
+    const ipError = projectClonePortIpValidation(port);
+    if (ipError) {
+      errors.push(`${port.id || port.network_name || 'port'}: ${ipError}`);
+    }
+  }
+  return errors;
+}
+
+function projectClonePreflightReady(instance) {
+  return !projectCloneState.sourceLoading && !projectCloneNeedsDetail(instance) && !projectCloneState.flavorsLoading && !projectCloneState.keypairsLoading && !projectCloneState.serverGroupsLoading;
+}
+
+function projectCloneLaunchLabel(instance) {
+  if (projectCloneState.submitting) return 'Launching Clone…';
+  if (isProjectCloneActive()) return 'Clone Busy…';
+  if (projectCloneState.sourceLoading) return 'Loading Source…';
+  if (projectCloneNeedsDetail(instance)) return projectCloneState.sourceLoadAttempted ? 'Retry Source' : 'Source Incomplete';
+  if (projectCloneState.flavorsLoading) return 'Loading Flavors…';
+  if (projectCloneState.keypairsLoading) return 'Loading Keypairs…';
+  if (projectCloneState.serverGroupsLoading) return 'Loading Groups…';
+  if (!projectCloneFlavorReady(instance)) return 'Flavor Missing';
+  if (projectCloneValidationErrors(instance).length) return 'Fix IPs';
+  return 'Launch Clone';
+}
+
+function projectCloneUserDataIntentLabel(instance) {
+  if (projectCloneState.userDataMode === 'replace') return 'Replace with new user_data';
+  if (projectCloneState.userDataMode === 'none') return 'None';
+  return projectCloneUserDataReadable(instance) ? 'Preserve source user_data' : 'Not readable for this user';
+}
+
+function projectCloneMetadataIntentLabel() {
+  return projectCloneState.keepMetadata ? 'Preserve where possible' : 'Do not preserve';
+}
+
+function projectClonePowerIntentLabel() {
+  return projectCloneState.powerOn ? 'Boot after build' : 'Create SHUTOFF';
+}
+
+function projectCloneFloatingIpIntentLabel(sourceFloatingIps) {
+  if (!projectCloneState.createFloatingIp) return 'None';
+  return sourceFloatingIps.length ? 'Auto new floating IP' : 'Auto if source network can infer external access';
+}
+
+function projectCloneKeypairIntentLabel(instance) {
+  const selectedName = String(projectCloneState.keyName || '').trim();
+  if (!selectedName) return 'No key pair';
+  const selected = projectCloneKeypairOptions().find((item) => item.name === selectedName);
+  if (selected) return projectCloneKeypairLabel(selected);
+  const sourceName = String(instance?.key_name || '').trim();
+  if (sourceName && sourceName === selectedName) return sourceName;
+  return selectedName;
+}
+
+function projectCloneServerGroupIntentLabel(instance) {
+  const selectedId = String(projectCloneState.serverGroupId || '').trim();
+  if (!selectedId) return 'No server group';
+  const selected = projectCloneServerGroupOptions().find((item) => item.id === selectedId);
+  if (selected) return projectCloneServerGroupLabel(selected);
+  const sourceId = String(instance?.server_group_id || '').trim();
+  if (sourceId && sourceId === selectedId) return sourceId;
+  return selectedId;
+}
+
+function projectCloneFlavorIntentLabel(instance) {
+  const selected = projectCloneFlavorOptions().find((item) => item.id === projectCloneState.flavorId);
+  if (selected?.name && selected?.id) return `${selected.name} (${selected.id})`;
+  if (selected?.name || selected?.id) return selected?.name || selected?.id;
+  if (instance?.flavor?.name && instance?.flavor?.id) return `${instance.flavor.name} (${instance.flavor.id})`;
+  return projectCloneState.flavorId || instance?.flavor?.name || instance?.flavor?.id || '—';
+}
+
+function projectCloneSecurityGroupLabel(group, includeId = true) {
+  const name = String(group?.name || '').trim();
+  const id = String(group?.id || '').trim();
+  if (name && includeId && id) return `${name} (${id})`;
+  return name || id || 'security group';
+}
+
+function projectCloneFlavorLabel(flavor) {
+  const name = String(flavor?.name || '').trim();
+  const id = String(flavor?.id || '').trim();
+  if (name && id) return `${name} (${id})`;
+  return name || id || '—';
+}
+
+function projectClonePortSourceSummary(port) {
+  const networkLabel = port?.network_name || port?.network_id || '—';
+  const fixedIps = Array.isArray(port?.fixed_ips) && port.fixed_ips.length ? port.fixed_ips.join(', ') : 'Auto';
+  const floatingIps = (port?.floating_ips || []).map((ip) => (typeof ip === 'string' ? ip : (ip.address || ip.floating_ip_address || ''))).filter(Boolean);
+  const securityGroups = projectClonePortSourceSecurityGroupLabels(port);
+  return [
+    networkLabel,
+    `Fixed IP: ${fixedIps}`,
+    `Floating IP: ${floatingIps.join(', ') || 'None'}`,
+    `SGs: ${securityGroups.join(', ') || 'None'}`,
+  ].join(' | ');
+}
+
+function projectClonePortTargetSummary(port) {
+  const targetNetwork = projectCloneTargetNetworkName(projectClonePortTargetNetworkId(port));
+  const fixedIp = projectClonePortFixedIp(port) || 'Auto';
+  const floatingIp = projectCloneState.createFloatingIp ? 'Auto new floating IP' : 'None';
+  const securityGroups = projectClonePortSelectedSecurityGroupLabels(port);
+  return [
+    targetNetwork,
+    `Fixed IP: ${fixedIp}`,
+    `Floating IP: ${floatingIp}`,
+    `SGs: ${securityGroups.join(', ') || 'None'}`,
+  ].join(' | ');
+}
+
+function projectClonePortSecurityGroupIds(port) {
+  const overrideGroups = projectClonePortOverride(port.id).securityGroupIds;
+  if (Array.isArray(overrideGroups)) return [...overrideGroups];
+  return [...new Set(port.security_groups || [])].filter(Boolean);
+}
+
+function projectClonePortSourceSecurityGroupLabels(port) {
+  const sourceGroups = [...new Set(port.security_groups || [])].filter(Boolean);
+  return sourceGroups.map((groupId) => {
+    const option = projectCloneSecurityGroupOptions().find((item) => item.id === groupId);
+    return projectCloneSecurityGroupLabel(option || { id: groupId, name: port.security_group_names?.find((name) => name === groupId) || groupId }, Boolean(option?.id));
+  });
+}
+
+function projectClonePortSelectedSecurityGroups(port) {
+  const options = projectCloneSecurityGroupOptions();
+  return projectClonePortSecurityGroupIds(port).map((id) => options.find((item) => item.id === id) || { id, name: id });
+}
+
+function projectClonePortSelectedSecurityGroupLabels(port) {
+  return projectClonePortSelectedSecurityGroups(port).map((group) => projectCloneSecurityGroupLabel(group));
+}
+
+function updateProjectClonePortSecurityGroupFromPicker(sourcePortId, value) {
+  const nextId = String(value || '').trim();
+  if (!nextId) return;
+  const current = { ...(projectCloneState.portOverrides?.[sourcePortId] || {}) };
+  const next = new Set(Array.isArray(current.securityGroupIds) ? current.securityGroupIds : []);
+  next.add(nextId);
+  current.securityGroupIds = [...next];
+  projectCloneState.portOverrides = {
+    ...(projectCloneState.portOverrides || {}),
+    [sourcePortId]: current,
+  };
+  renderProjectCloneOverlay();
+}
+
+function removeProjectClonePortSecurityGroup(sourcePortId, groupId) {
+  const current = { ...(projectCloneState.portOverrides?.[sourcePortId] || {}) };
+  current.securityGroupIds = (Array.isArray(current.securityGroupIds) ? current.securityGroupIds : []).filter((id) => id !== groupId);
+  projectCloneState.portOverrides = {
+    ...(projectCloneState.portOverrides || {}),
+    [sourcePortId]: current,
+  };
+  renderProjectCloneOverlay();
+}
+
+function projectCloneNeedsDetail(instance) {
+  if (!instance) return true;
+  return !Array.isArray(instance.ports) || !('user_data_visible' in instance);
+}
+
+async function ensureProjectCloneSourceDetail(instanceId, force = false) {
+  if (!instanceId || projectCloneState.sourceLoading) return;
+  if (projectCloneState.sourceLoadAttempted && !force) return;
+  const current = projectCloneSourceFor(instanceId);
+  if (!projectCloneNeedsDetail(current)) return;
+  projectCloneState.sourceLoadAttempted = true;
+  projectCloneState.sourceLoading = true;
+  projectCloneState.message = 'Loading source instance detail for clone planning.';
+  projectCloneState.tone = 'info';
+  if (projectCloneState.open) renderProjectCloneOverlay();
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller
+    ? setTimeout(() => controller.abort(new Error('clone source timeout')), PROJECT_CLONE_SOURCE_TIMEOUT_MS)
+    : 0;
+  try {
+    const resp = await fetch(`/api/instances/${encodeURIComponent(instanceId)}/clone-source`, controller ? { signal: controller.signal } : undefined);
+    const json = await resp.json();
+    if (json.api_issue) recordApiIssue(json.api_issue);
+    else recordApiSuccess('OpenStack');
+    if (!resp.ok || json.error) throw new Error(json.error || `HTTP ${resp.status}`);
+    const detail = json.instance || null;
+    if (detail) {
+      if (!Array.isArray(detail.ports)) detail.ports = [];
+      if (!Object.prototype.hasOwnProperty.call(detail, 'user_data_visible')) detail.user_data_visible = false;
+      if (!Object.prototype.hasOwnProperty.call(detail, 'user_data_present')) detail.user_data_present = false;
+      if (!Array.isArray(detail.related_load_balancers)) detail.related_load_balancers = [];
+      if (projectDetailState.kind === 'instances' && projectDetailState.item?.id === instanceId) {
+        projectDetailState.data = detail;
+      }
+      projectCloneState.source = detail;
+      projectCloneState.flavorId = projectCloneState.flavorId || projectCloneDefaultFlavorId(detail);
+      projectCloneState.keyName = projectCloneState.keyName || projectCloneDefaultKeyName(detail);
+      projectCloneState.serverGroupId = projectCloneState.serverGroupId || projectCloneDefaultServerGroupId(detail);
+      if (!projectCloneUserDataReadable(detail) && projectCloneState.userDataMode === 'preserve') {
+        projectCloneState.userDataMode = 'none';
+      }
+      projectCloneState.portOverrides = {};
+      (detail.ports || []).forEach((port) => {
+        const defaultSubnetId = Array.isArray(port.subnets) && port.subnets.length === 1 ? (port.subnets[0]?.id || '') : '';
+        projectCloneState.portOverrides[port.id] = {
+          networkId: port.network_id || '',
+          subnetId: defaultSubnetId,
+          fixedIp: '',
+          securityGroupIds: [...new Set(port.security_groups || [])].filter(Boolean),
+        };
+      });
+      projectCloneState.message = '';
+    }
+  } catch (err) {
+    const aborted = controller && controller.signal?.aborted;
+    projectCloneState.message = aborted
+      ? `Timed out after ${Math.round(PROJECT_CLONE_SOURCE_TIMEOUT_MS / 1000)}s while loading clone source detail. Retry to try again.`
+      : `Failed to load source instance detail: ${err}`;
+    projectCloneState.tone = 'error';
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+    projectCloneState.sourceLoading = false;
+    if (projectCloneState.open) renderProjectCloneOverlay();
+  }
+}
+
 function openProjectClonePlanner(instanceId) {
   const instance = projectCloneSourceFor(instanceId);
   if (!instance) {
@@ -650,20 +1076,47 @@ function openProjectClonePlanner(instanceId) {
   }
   projectCloneState.open = true;
   projectCloneState.mode = 'planner';
+  projectCloneState.workflowTab = 'workflow';
   projectCloneState.source = instance;
+  projectCloneState.sourceLoading = projectCloneNeedsDetail(instance);
+  projectCloneState.sourceLoadAttempted = false;
   projectCloneState.newName = `vv-${String(instance.name || 'instance').trim() || 'instance'}-clone`;
+  projectCloneState.flavorId = projectCloneDefaultFlavorId(instance);
+  projectCloneState.keyName = projectCloneDefaultKeyName(instance);
+  projectCloneState.serverGroupId = projectCloneDefaultServerGroupId(instance);
   projectCloneState.cloneDataVolumes = true;
   projectCloneState.createFloatingIp = true;
   projectCloneState.powerOn = true;
   projectCloneState.keepMetadata = true;
+  projectCloneState.userDataMode = projectCloneUserDataReadable(instance) ? 'preserve' : 'none';
+  projectCloneState.userDataText = '';
+  projectCloneState.portOverrides = {};
+  (instance.ports || []).forEach((port) => {
+    const defaultSubnetId = Array.isArray(port.subnets) && port.subnets.length === 1 ? (port.subnets[0]?.id || '') : '';
+    projectCloneState.portOverrides[port.id] = {
+      networkId: port.network_id || '',
+      subnetId: defaultSubnetId,
+      fixedIp: '',
+      securityGroupIds: [...new Set(port.security_groups || [])].filter(Boolean),
+    };
+  });
   projectCloneState.message = '';
   projectCloneState.tone = 'info';
+  if (projectCloneState.sourceLoading) {
+    projectCloneState.message = 'Loading full source instance detail for clone planning.';
+  }
   renderProjectCloneOverlay();
+  ensureProjectCloneFlavorsLoaded();
+  ensureProjectCloneKeypairsLoaded();
+  ensureProjectCloneServerGroupsLoaded();
+  if (selectedProjectId) ensureProjectNetworkingFamiliesLoaded(selectedProjectId);
+  ensureProjectCloneSourceDetail(instanceId);
 }
 
 function closeProjectClonePlanner() {
   projectCloneState.open = false;
   projectCloneState.mode = 'planner';
+  projectCloneState.workflowTab = 'workflow';
   projectCloneState.source = null;
   if (!isProjectCloneActive()) {
     projectCloneState.message = '';
@@ -672,6 +1125,39 @@ function closeProjectClonePlanner() {
   const overlay = document.getElementById('project-clone-overlay');
   if (overlay) overlay.classList.remove('open');
   if (activeView === 'projects') renderProjectsWorkspace();
+}
+
+function resetProjectCloneState() {
+  stopProjectCloneStatusPolling();
+  projectCloneState.open = false;
+  projectCloneState.mode = 'planner';
+  projectCloneState.workflowTab = 'workflow';
+  projectCloneState.source = null;
+  projectCloneState.sourceLoading = false;
+  projectCloneState.sourceLoadAttempted = false;
+  projectCloneState.newName = '';
+  projectCloneState.flavorId = '';
+  projectCloneState.keyName = '';
+  projectCloneState.serverGroupId = '';
+  projectCloneState.cloneDataVolumes = true;
+  projectCloneState.createFloatingIp = true;
+  projectCloneState.powerOn = true;
+  projectCloneState.keepMetadata = true;
+  projectCloneState.userDataMode = 'preserve';
+  projectCloneState.userDataText = '';
+  projectCloneState.portOverrides = {};
+  projectCloneState.submitting = false;
+  projectCloneState.requestId = '';
+  projectCloneState.activeCloneLabel = '';
+  projectCloneState.trackedInstanceId = '';
+  projectCloneState.status = null;
+  projectCloneState.statusPollError = '';
+  projectCloneState.message = '';
+  projectCloneState.tone = 'info';
+  const overlay = document.getElementById('project-clone-overlay');
+  if (overlay) overlay.classList.remove('open');
+  const content = document.getElementById('project-clone-overlay-content');
+  if (content) content.innerHTML = '';
 }
 
 async function loadProjectCloneStatus(instanceId, force = false) {
@@ -786,6 +1272,14 @@ function openTrackedProjectCloneWorkflow() {
   if (source) projectCloneState.source = source;
   projectCloneState.open = true;
   projectCloneState.mode = 'workflow';
+  projectCloneState.workflowTab = 'workflow';
+  renderProjectCloneOverlay();
+}
+
+function switchProjectCloneWorkflowTab(tab) {
+  const valid = ['workflow', 'rollback', 'source'];
+  if (!valid.includes(String(tab || ''))) return;
+  projectCloneState.workflowTab = tab;
   renderProjectCloneOverlay();
 }
 
@@ -810,6 +1304,8 @@ function projectCloneGroupedRows(status = projectCloneState.status) {
   const createdImages = Array.isArray(created.snapshot_images) ? created.snapshot_images.map((item) => item?.id).filter(Boolean) : [];
   const createdServers = Array.isArray(created.servers) ? created.servers.map((item) => item?.id).filter(Boolean) : [];
   const createdFloatingIps = Array.isArray(created.floating_ips) ? created.floating_ips.map((item) => item?.id).filter(Boolean) : [];
+  const sourceVolumeRows = projectCloneState.source ? projectCloneVolumeRows(projectCloneState.source) : [];
+  const hasVolumeClonePlan = sourceVolumeRows.some((item) => item.role === 'Root volume' || (projectCloneState.cloneDataVolumes && item.cloneable));
 
   const addRow = (row) => {
     if (!row) return;
@@ -818,16 +1314,21 @@ function projectCloneGroupedRows(status = projectCloneState.status) {
 
   const failureStep = String(status?.step_key || '').trim();
   const failureError = String(status?.error || '').trim();
+  const cloneState = String(status?.state || '').toLowerCase();
+  const cloneFailed = cloneState === 'failed';
+  const cloneCompleted = cloneState === 'completed';
 
   addRow({
     key: 'source',
     task: 'Source Instance',
     description: 'Load source server context and resolve the clone flavor.',
-    resourceKind: 'Server / Flavor',
-    resourceValue: [status?.source_instance_id || projectCloneState.trackedInstanceId || '', flavor.id || flavor.name || ''].filter(Boolean).join(' · ') || '—',
-    state: failureStep === 'fetch_source' || failureStep === 'resolve_source' ? 'failed' : (byKey.has('resolve_source') ? 'completed' : byKey.has('fetch_source') ? 'running' : 'pending'),
-    statusText: failureStep === 'fetch_source' || failureStep === 'resolve_source' ? 'Failed' : byKey.has('resolve_source') ? 'Resolved' : byKey.has('fetch_source') ? 'Resolving' : 'Pending',
-    error: (failureStep === 'fetch_source' || failureStep === 'resolve_source') ? failureError : '',
+    resourceLines: [
+      { kind: 'Server', value: status?.source_instance_id || projectCloneState.trackedInstanceId || '—' },
+      { kind: 'Flavor', value: projectCloneFlavorLabel(flavor) },
+    ],
+    state: cloneFailed && (failureStep === 'fetch_source' || failureStep === 'resolve_source') ? 'failed' : (byKey.has('resolve_source') ? 'completed' : byKey.has('fetch_source') ? 'running' : 'pending'),
+    statusText: cloneFailed && (failureStep === 'fetch_source' || failureStep === 'resolve_source') ? 'Failed' : byKey.has('resolve_source') ? 'Resolved' : byKey.has('fetch_source') ? 'Resolving' : 'Pending',
+    error: cloneFailed && (failureStep === 'fetch_source' || failureStep === 'resolve_source') ? failureError : '',
   });
 
   addRow({
@@ -836,49 +1337,56 @@ function projectCloneGroupedRows(status = projectCloneState.status) {
     description: 'Resolve and clone Neutron ports as one operation.',
     resourceKind: 'Ports',
     resourceValue: createdPorts.length ? createdPorts.join(', ') : '—',
-    state: failureStep === 'resolve_ports' || failureStep === 'create_ports' ? 'failed' : (createdPorts.length ? 'completed' : byKey.has('resolve_ports') || byKey.has('create_ports') ? 'running' : 'pending'),
-    statusText: failureStep === 'resolve_ports' || failureStep === 'create_ports' ? 'Failed' : createdPorts.length ? 'Cloned' : byKey.has('resolve_ports') || byKey.has('create_ports') ? 'Cloning' : 'Pending',
-    error: (failureStep === 'resolve_ports' || failureStep === 'create_ports') ? failureError : '',
+    state: cloneFailed && (failureStep === 'resolve_ports' || failureStep === 'create_ports') ? 'failed' : (createdPorts.length ? 'completed' : byKey.has('resolve_ports') || byKey.has('create_ports') ? 'running' : 'pending'),
+    statusText: cloneFailed && (failureStep === 'resolve_ports' || failureStep === 'create_ports') ? 'Failed' : createdPorts.length ? 'Cloned' : byKey.has('resolve_ports') || byKey.has('create_ports') ? 'Cloning' : 'Pending',
+    error: cloneFailed && (failureStep === 'resolve_ports' || failureStep === 'create_ports') ? failureError : '',
   });
 
-  if (byKey.has('resolve_volumes') || byKey.has('clone_volume') || createdVolumes.length) {
+  if (byKey.has('clone_volume') || createdVolumes.length || (hasVolumeClonePlan && byKey.has('resolve_volumes'))) {
     addRow({
       key: 'volumes',
       task: 'Volumes',
-      description: 'Resolve attached volumes and clone the ones selected for the new server.',
+      description: 'Clone the source volumes selected for the new server.',
       resourceKind: 'Volumes',
       resourceValue: createdVolumes.length ? createdVolumes.join(', ') : 'none',
-      state: failureStep === 'resolve_volumes' || failureStep === 'clone_volume' ? 'failed' : (createdVolumes.length ? 'completed' : byKey.has('resolve_volumes') || byKey.has('clone_volume') ? 'running' : 'pending'),
-      statusText: failureStep === 'resolve_volumes' || failureStep === 'clone_volume' ? 'Failed' : createdVolumes.length ? 'Cloned' : byKey.has('resolve_volumes') || byKey.has('clone_volume') ? 'Cloning' : 'Pending',
-      error: (failureStep === 'resolve_volumes' || failureStep === 'clone_volume') ? failureError : '',
+      state: cloneFailed && (failureStep === 'resolve_volumes' || failureStep === 'clone_volume') ? 'failed' : (createdVolumes.length ? 'completed' : byKey.has('resolve_volumes') || byKey.has('clone_volume') ? 'running' : 'pending'),
+      statusText: cloneFailed && (failureStep === 'resolve_volumes' || failureStep === 'clone_volume') ? 'Failed' : createdVolumes.length ? 'Cloned' : byKey.has('resolve_volumes') || byKey.has('clone_volume') ? 'Cloning' : 'Pending',
+      error: cloneFailed && (failureStep === 'resolve_volumes' || failureStep === 'clone_volume') ? failureError : '',
     });
   }
 
-  if (byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') || byKey.has('completed') || createdServers.length || createdImages.length) {
-    const serverResource = [
-      createdImages.length ? createdImages.join(', ') : '',
-      createdServers.length ? createdServers.join(', ') : (status?.result?.server_id || ''),
-    ].filter(Boolean).join(' · ');
-    const cloneCompleted = String(status?.state || '').toLowerCase() === 'completed';
-    const buildFailed = !cloneCompleted && ['create_snapshot', 'create_server', 'wait_server', 'power_off'].includes(failureStep);
+  if (byKey.has('create_snapshot') || createdImages.length) {
+    const snapshotFailed = cloneFailed && failureStep === 'create_snapshot';
+    addRow({
+      key: 'snapshot',
+      task: 'Snapshot Image',
+      description: 'Create a snapshot image when the clone needs an image-backed boot path.',
+      resourceKind: 'Snapshot Image',
+      resourceValue: createdImages.length ? createdImages.join(', ') : '—',
+      state: snapshotFailed ? 'failed' : createdImages.length ? 'completed' : byKey.has('create_snapshot') ? 'running' : 'pending',
+      statusText: snapshotFailed ? 'Failed' : createdImages.length ? 'Created' : byKey.has('create_snapshot') ? 'Creating' : 'Pending',
+      error: snapshotFailed ? failureError : '',
+    });
+  }
+
+  if (byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') || byKey.has('completed') || createdServers.length) {
+    const serverResource = createdServers.length ? createdServers.join(', ') : (status?.result?.server_id || '');
+    const buildFailed = cloneFailed && ['create_server', 'wait_server', 'power_off'].includes(failureStep);
     addRow({
       key: 'build',
       task: 'Server Build',
-      description: 'Create any snapshot image needed, build the server, and wait for the final power state.',
-      resourceKind: createdImages.length ? 'Snapshot / Server' : 'Server',
+      description: 'Create the server and wait for the final power state.',
+      resourceKind: 'Server',
       resourceValue: serverResource || '—',
-      resourceLines: [
-        ...(createdImages.length ? [{ kind: 'Snapshot Image', value: createdImages.join(', ') }] : []),
-        ...((createdServers.length || status?.result?.server_id) ? [{ kind: 'Server', value: createdServers.join(', ') || status?.result?.server_id || '—' }] : []),
-      ],
-      state: buildFailed ? 'failed' : (cloneCompleted ? 'completed' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'running' : 'pending'),
-      statusText: buildFailed ? 'Failed' : (cloneCompleted ? 'Built' : byKey.has('create_snapshot') || byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'Building' : 'Pending'),
+      resourceLines: (createdServers.length || status?.result?.server_id) ? [{ kind: 'Server', value: createdServers.join(', ') || status?.result?.server_id || '—' }] : [],
+      state: buildFailed ? 'failed' : (cloneCompleted ? 'completed' : byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'running' : 'pending'),
+      statusText: buildFailed ? 'Failed' : (cloneCompleted ? 'Built' : byKey.has('create_server') || byKey.has('wait_server') || byKey.has('power_off') ? 'Building' : 'Pending'),
       error: buildFailed ? failureError : '',
     });
   }
 
   if (status?.result?.floating_ip_requested || byKey.has('create_floating_ip') || createdFloatingIps.length) {
-    const floatingIpFailed = failureStep === 'create_floating_ip';
+    const floatingIpFailed = cloneFailed && failureStep === 'create_floating_ip';
     const floatingIpSkipped = byKey.has('create_floating_ip') && !createdFloatingIps.length && !floatingIpFailed && String(status?.state || '').toLowerCase() !== 'running';
     addRow({
       key: 'floating_ip',
@@ -912,6 +1420,13 @@ function projectCloneMessageClass() {
   if (projectCloneState.tone === 'error') return 'clone-workflow-message error';
   if (projectCloneState.tone === 'warn') return 'clone-workflow-message warn';
   return 'clone-workflow-message info';
+}
+
+function shouldShowProjectCloneMessage() {
+  const state = projectCloneStatusState();
+  if (!projectCloneState.message) return false;
+  if (state === 'completed') return false;
+  return true;
 }
 
 function renderProjectCloneWorkflowPanel() {
@@ -987,11 +1502,49 @@ function renderProjectCloneWorkflowPanel() {
           </table>
         </div>
       </div>
+    </div>
+  `;
+}
+
+function renderProjectCloneRollbackPanel() {
+  const status = projectCloneState.status;
+  if (!status) return '';
+  const cleanupRows = Array.isArray(status.cleanup_actions) ? status.cleanup_actions : [];
+  const residualRows = Array.isArray(status.residual_resources) ? status.residual_resources : [];
+  return `
+    <div class="clone-workflow-layout">
+      <div class="card">
+        <div class="card-title">Rollback Summary</div>
+        <div class="card-body">
+          <div class="clone-workflow-summary-grid">
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Rollback Attempts</div>
+              <div class="clone-workflow-summary-value">${esc(String(cleanupRows.length))}</div>
+              <div class="clone-workflow-summary-sub">Cleanup actions recorded for this clone.</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Leftover Resources</div>
+              <div class="clone-workflow-summary-value">${esc(String(residualRows.length))}</div>
+              <div class="clone-workflow-summary-sub">${esc(residualRows.length ? 'Operator action still required.' : 'No leftover resources remain.')}</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Clone State</div>
+              <div class="clone-workflow-summary-value">${esc(String(status.state || 'unknown'))}</div>
+              <div class="clone-workflow-summary-sub">Overall workflow state from the backend tracker.</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Current Step</div>
+              <div class="clone-workflow-summary-value">${esc(status.step_label || '—')}</div>
+              <div class="clone-workflow-summary-sub">${esc(status.detail || 'No additional detail.')}</div>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="card">
         <div class="card-title">Operator Recovery</div>
         <div class="card-body">
           <div class="clone-workflow-notice">
-            The table above identifies the exact failed task and resource IDs. This recovery section only appears when rollback has work to report or leftovers need cleanup.
+            Use this pane for cleanup and follow-up only. Workflow execution details stay in the Workflow tab.
           </div>
           ${cleanupRows.length ? `
             <div class="clone-workflow-section">
@@ -1006,7 +1559,7 @@ function renderProjectCloneWorkflowPanel() {
                   </tr>`).join('')}
                 </tbody>
               </table>
-            </div>` : ''}
+            </div>` : '<div class="hint">No rollback actions have been recorded for this clone.</div>'}
           ${residualRows.length ? `
             <div class="clone-workflow-residual-list">
               ${residualRows.map((item) => `<div class="clone-workflow-residual-item">
@@ -1016,7 +1569,129 @@ function renderProjectCloneWorkflowPanel() {
                 </div>
                 <button class="btn primary" onclick="cleanupProjectCloneResource('${escAttr(status.source_instance_id || projectCloneState.trackedInstanceId || '')}','${escAttr(item.resource_type || '')}','${escAttr(item.resource_id || '')}')">Delete Resource</button>
               </div>`).join('')}
-            </div>` : cleanupRows.length ? '<div class="hint">No leftover resources remain after rollback.</div>' : '<div class="hint">No rollback or cleanup actions are currently needed.</div>'}
+            </div>` : cleanupRows.length ? '<div class="hint">No leftover resources remain after rollback.</div>' : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderProjectCloneSourceContextPanel(instance, context = {}) {
+  const ports = Array.isArray(context.ports) ? context.ports : [];
+  const volumeRows = Array.isArray(context.volumeRows) ? context.volumeRows : [];
+  const relatedLbs = Array.isArray(context.relatedLbs) ? context.relatedLbs : [];
+  const securityGroupRows = Array.isArray(context.securityGroupRows) ? context.securityGroupRows : [];
+  const sourceFloatingIps = Array.isArray(context.sourceFloatingIps) ? context.sourceFloatingIps : [];
+  const flavor = instance?.flavor || {};
+  const rootVolume = volumeRows.find((item) => item.role === 'Root volume') || null;
+  const cloneableDataVolumes = volumeRows.filter((item) => item.role === 'Data volume' && item.cloneable);
+  const skippedDataVolumes = volumeRows.filter((item) => item.role === 'Data volume' && !item.cloneable);
+  const selectedFlavor = projectCloneFlavorOptions().find((item) => item.id === projectCloneState.flavorId) || null;
+  const userDataReadable = projectCloneUserDataReadable(instance);
+  return `
+    <div class="clone-workflow-layout">
+      <div class="card">
+        <div class="card-title">Source Summary</div>
+        <div class="card-body">
+          <div class="clone-workflow-summary-grid">
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Instance</div>
+              <div class="clone-workflow-summary-value">${esc(instance?.name || instance?.id || '—')}</div>
+              <div class="clone-workflow-summary-sub">${esc(instance?.status || 'UNKNOWN')} on ${esc(instance?.compute_host || 'unknown host')}</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Flavor</div>
+              <div class="clone-workflow-summary-value">${esc(projectCloneFlavorLabel(selectedFlavor || flavor))}</div>
+              <div class="clone-workflow-summary-sub">${esc(projectCloneFlavorReady(instance) ? 'Resolved before clone launch.' : 'Flavor is unresolved.')}</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Ports</div>
+              <div class="clone-workflow-summary-value">${esc(String(ports.length))}</div>
+              <div class="clone-workflow-summary-sub">${esc(sourceFloatingIps.length ? `${sourceFloatingIps.length} floating IP signal(s) found.` : 'No source floating IPs detected.')}</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">User Data</div>
+              <div class="clone-workflow-summary-value">${esc(projectCloneState.userDataMode === 'replace' ? 'Replace' : projectCloneState.userDataMode === 'none' ? 'None' : 'Preserve')}</div>
+              <div class="clone-workflow-summary-sub">${esc(projectCloneState.userDataMode === 'preserve' ? (userDataReadable ? 'Source user_data is readable and will be preserved when possible.' : 'Source user_data is not readable to this user.') : projectCloneState.userDataMode === 'replace' ? 'Clone will boot with replacement user_data.' : 'Clone will be created without user_data.')}</div>
+            </div>
+            <div class="clone-workflow-summary-box">
+              <div class="clone-workflow-summary-label">Boot Source</div>
+              <div class="clone-workflow-summary-value">${esc(rootVolume?.name || (instance?.is_volume_backed ? 'Root volume present' : 'Image / ephemeral'))}</div>
+              <div class="clone-workflow-summary-sub">${esc(`${cloneableDataVolumes.length} cloneable data volume(s), ${skippedDataVolumes.length} skipped`)}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Network Plan</div>
+        <div class="card-body">
+          <table class="data-table clone-context-network-table" style="margin-bottom:0">
+            <thead><tr><th>Port</th><th>Source Network</th><th>Clone Target</th><th>Subnet / Router</th><th>Floating IPs</th><th>Security Groups</th></tr></thead>
+            <tbody>
+              ${ports.length ? ports.map((port) => {
+                const subnetLabels = (port.subnets || []).map((subnet) => {
+                  const router = subnet?.router?.name || subnet?.router?.id || port.gateway_target || '';
+                  return [subnet?.name || subnet?.cidr || subnet?.id || '', router ? `via ${router}` : ''].filter(Boolean).join(' ');
+                }).filter(Boolean);
+                const floatingIps = (port.floating_ips || []).map((ip) => (typeof ip === 'string' ? ip : (ip.address || ip.floating_ip_address || ''))).filter(Boolean);
+                const portSecurityGroups = [...new Set(port.security_group_names || port.security_groups || [])].filter(Boolean);
+                const selectedNetworkId = projectClonePortTargetNetworkId(port);
+                const targetNetworkName = projectCloneTargetNetworkName(selectedNetworkId);
+                return `<tr>
+                  <td class="mono">${esc(port.id || '—')}</td>
+                  <td>
+                    <div>${esc(port.network_name || '—')}</div>
+                    <div class="hint mono">${esc(port.network_id || '—')}</div>
+                    <div class="hint mono">${esc((port.fixed_ips || []).join(', ') || 'Auto')}</div>
+                  </td>
+                  <td>
+                    <div>${esc(targetNetworkName)}</div>
+                    ${selectedNetworkId && targetNetworkName !== selectedNetworkId ? `<div class="hint mono">${esc(selectedNetworkId)}</div>` : ''}
+                    <div class="hint mono">${esc(projectClonePortFixedIp(port) || 'Auto')}</div>
+                  </td>
+                  <td>${esc(subnetLabels.join(', ') || port.gateway_target || '—')}</td>
+                  <td class="mono">${esc(floatingIps.join(', ') || 'None')}</td>
+                  <td>${esc(portSecurityGroups.map((group, index) => {
+                    const resolved = securityGroupRows.find((item) => item.name === group || item.id === group);
+                    return projectCloneSecurityGroupLabel(resolved || { id: group, name: group }, Boolean(resolved?.id));
+                  }).join(', ') || '—')}</td>
+                </tr>`;
+              }).join('') : '<tr><td colspan="6" style="color:var(--dim)">No Neutron port metadata is available for this instance.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Security Group Plan</div>
+        <div class="card-body">
+          <table class="data-table" style="margin-bottom:0">
+              <thead><tr><th>Security Group</th><th>Networks</th><th>Attached Ports</th><th>Clone Guidance</th></tr></thead>
+              <tbody>
+                ${securityGroupRows.length ? securityGroupRows.map((group) => `<tr>
+                <td>${esc(projectCloneSecurityGroupLabel(group))}</td>
+                <td>${esc(group.networks.join(', ') || '—')}</td>
+                <td class="mono">${esc(group.attachedPorts.join(', ') || '—')}</td>
+                <td>${esc(group.portCount > 1 ? 'Shared across multiple source ports; confirm the clone still needs the same east-west reachability.' : 'Present on a single source port; safe default is to preserve until application cutover is reviewed.')}</td>
+              </tr>`).join('') : '<tr><td colspan="4" style="color:var(--dim)">No security groups are attached to the source instance ports.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Volume Plan</div>
+        <div class="card-body">
+          <table class="data-table" style="margin-bottom:0">
+            <thead><tr><th>Volume</th><th>Role</th><th>Action</th><th>Note</th></tr></thead>
+            <tbody>
+              ${volumeRows.length ? volumeRows.map((item) => `<tr>
+                <td>${esc(item.name)}</td>
+                <td>${esc(item.role)}</td>
+                <td>${esc(item.role === 'Root volume' ? 'Clone' : (projectCloneState.cloneDataVolumes && item.cloneable ? 'Clone' : 'Skip'))}</td>
+                <td>${esc(item.reason)}</td>
+              </tr>`).join('') : '<tr><td colspan="4" style="color:var(--dim)">No attached volume metadata is available for this instance.</td></tr>'}
+            </tbody>
+          </table>
+          ${relatedLbs.length ? `<div class="clone-workflow-notice" style="margin-top:10px">Load balancer membership will not be cloned automatically. ${esc(`${relatedLbs.length} load balancer relationship(s) were detected on the source instance.`)}</div>` : ''}
         </div>
       </div>
     </div>
@@ -1024,13 +1699,33 @@ function renderProjectCloneWorkflowPanel() {
 }
 
 function projectCloneFlavorReady(instance) {
-  const flavor = instance?.flavor || {};
-  return Boolean(String(flavor.id || '').trim() || String(flavor.name || '').trim());
+  const selectedFlavorId = String(projectCloneState.flavorId || '').trim();
+  if (!selectedFlavorId) return false;
+  if (!projectCloneState.flavorsLoaded || !projectCloneState.flavors.length) return Boolean(selectedFlavorId);
+  return projectCloneState.flavors.some((item) => item.id === selectedFlavorId);
 }
 
 function updateProjectCloneField(field, value) {
   if (!(field in projectCloneState)) return;
   projectCloneState[field] = value;
+  renderProjectCloneOverlay();
+}
+
+function updateProjectClonePortOverride(sourcePortId, field, value) {
+  const current = { ...(projectCloneState.portOverrides?.[sourcePortId] || {}) };
+  current[field] = value;
+  if (field === 'networkId' && value !== current.networkId) {
+    current.subnetId = '';
+    current.fixedIp = '';
+  }
+  if (field === 'networkId') {
+    current.subnetId = '';
+    current.fixedIp = '';
+  }
+  projectCloneState.portOverrides = {
+    ...(projectCloneState.portOverrides || {}),
+    [sourcePortId]: current,
+  };
   renderProjectCloneOverlay();
 }
 
@@ -1057,6 +1752,19 @@ function restoreProjectCloneFocusState(container, state) {
 async function submitProjectClonePlanner() {
   const instance = projectCloneState.source;
   if (!instance || projectCloneState.submitting || isProjectCloneActive()) return;
+  if (!projectClonePreflightReady(instance)) {
+    projectCloneState.message = 'Clone launch is blocked until the full source detail and flavor list finish loading.';
+    projectCloneState.tone = 'error';
+    renderProjectCloneOverlay();
+    return;
+  }
+  const validationErrors = projectCloneValidationErrors(instance);
+  if (validationErrors.length) {
+    projectCloneState.message = `Fix the requested fixed IP values before launching the clone. ${validationErrors[0]}`;
+    projectCloneState.tone = 'error';
+    renderProjectCloneOverlay();
+    return;
+  }
   if (!projectCloneFlavorReady(instance)) {
     projectCloneState.message = 'Clone is blocked because the source flavor cannot be resolved.';
     projectCloneState.tone = 'error';
@@ -1077,6 +1785,37 @@ async function submitProjectClonePlanner() {
   const createFloatingIp = !!projectCloneState.createFloatingIp;
   const powerOn = !!projectCloneState.powerOn;
   const keepMetadata = !!projectCloneState.keepMetadata;
+  const flavorId = String(projectCloneState.flavorId || '').trim();
+  const keyName = String(projectCloneState.keyName || '');
+  const serverGroupId = String(projectCloneState.serverGroupId || '');
+  const userDataMode = String(projectCloneState.userDataMode || 'preserve').trim().toLowerCase() || 'preserve';
+  const userDataText = String(projectCloneState.userDataText || '');
+  if (userDataMode === 'preserve' && !projectCloneUserDataReadable(instance)) {
+    projectCloneState.message = 'Source user_data is not readable for this user. Choose Replace or None.';
+    projectCloneState.tone = 'error';
+    renderProjectCloneOverlay();
+    return;
+  }
+  if (userDataMode === 'replace' && !userDataText.trim()) {
+    projectCloneState.message = 'Provide replacement user_data or choose None.';
+    projectCloneState.tone = 'error';
+    renderProjectCloneOverlay();
+    const input = document.getElementById('project-clone-userdata');
+    input?.focus();
+    return;
+  }
+  const portOverrides = (instance.ports || []).map((port) => {
+    const override = projectClonePortOverride(port.id);
+    const sameNetwork = String(override.networkId || port.network_id || '') === String(port.network_id || '');
+    const sourceSubnetId = Array.isArray(port.subnets) && port.subnets.length === 1 ? String(port.subnets[0]?.id || '') : '';
+    return {
+      source_port_id: port.id,
+      network_id: String(override.networkId || port.network_id || ''),
+      subnet_id: sameNetwork ? String(override.subnetId || sourceSubnetId || '') : '',
+      fixed_ip: String(override.fixedIp || ''),
+      security_group_ids: [...projectClonePortSecurityGroupIds(port)],
+    };
+  });
   const requestId = `${instance.id}:${Date.now()}`;
   projectCloneState.submitting = true;
   projectCloneState.requestId = requestId;
@@ -1106,10 +1845,16 @@ async function submitProjectClonePlanner() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         new_name: newName,
+        flavor_id: flavorId,
+        key_name: keyName,
+        server_group_id: serverGroupId,
         clone_data_volumes: cloneDataVolumes,
         create_floating_ip: createFloatingIp,
         power_on: powerOn,
         keep_metadata: keepMetadata,
+        user_data_mode: userDataMode,
+        user_data_text: userDataText,
+        port_overrides: portOverrides,
       }),
     });
     const json = await resp.json();
@@ -1220,6 +1965,30 @@ function renderProjectCloneOverlay() {
   });
   const flavor = instance.flavor || {};
   const flavorReady = projectCloneFlavorReady(instance);
+  const flavorOptions = projectCloneFlavorOptions();
+  const keypairOptions = projectCloneKeypairOptions();
+  const keypairSelectOptions = [...keypairOptions];
+  if (projectCloneState.keyName && !keypairSelectOptions.some((item) => item.name === projectCloneState.keyName)) {
+    keypairSelectOptions.unshift({ name: projectCloneState.keyName, fingerprint: '' });
+  }
+  const serverGroupOptions = projectCloneServerGroupOptions();
+  const serverGroupSelectOptions = [...serverGroupOptions];
+  if (projectCloneState.serverGroupId && !serverGroupSelectOptions.some((item) => item.id === projectCloneState.serverGroupId)) {
+    serverGroupSelectOptions.unshift({
+      id: projectCloneState.serverGroupId,
+      name: instance.server_group_name || projectCloneState.serverGroupId,
+      policy: '',
+    });
+  }
+  const securityGroupOptions = projectCloneSecurityGroupOptions();
+  const userDataReadable = projectCloneUserDataReadable(instance);
+  const userDataPresent = projectCloneUserDataPresent(instance);
+  const projectNetworks = projectCloneProjectNetworks();
+  const cloneValidationErrors = projectCloneValidationErrors(instance);
+  const clonePreflightReady = projectClonePreflightReady(instance);
+  if (projectCloneState.mode === 'planner' && projectCloneNeedsDetail(instance) && !projectCloneState.sourceLoading && !projectCloneState.sourceLoadAttempted) {
+    ensureProjectCloneSourceDetail(instance.id);
+  }
   const priorShell = content.querySelector('.project-clone-shell');
   const priorScrollTop = priorShell ? priorShell.scrollTop : 0;
   const focusState = captureProjectCloneFocusState(content);
@@ -1248,13 +2017,17 @@ function renderProjectCloneOverlay() {
           </div>
         </div>
         <div class="clone-workflow-tabs">
-          <div class="clone-workflow-tab active">Workflow</div>
-          <div class="clone-workflow-tab">Rollback</div>
-          <div class="clone-workflow-tab">Source Context</div>
+          <button class="clone-workflow-tab ${projectCloneState.workflowTab === 'workflow' ? 'active' : ''}" onclick="switchProjectCloneWorkflowTab('workflow')">Workflow</button>
+          <button class="clone-workflow-tab ${projectCloneState.workflowTab === 'rollback' ? 'active' : ''}" onclick="switchProjectCloneWorkflowTab('rollback')">Rollback</button>
+          <button class="clone-workflow-tab ${projectCloneState.workflowTab === 'source' ? 'active' : ''}" onclick="switchProjectCloneWorkflowTab('source')">Source Context</button>
         </div>
         <div class="session-body">
-          ${renderProjectCloneWorkflowPanel()}
-          ${projectCloneState.message ? `<div class="${projectCloneMessageClass()}">${esc(projectCloneState.message)}</div>` : ''}
+          ${projectCloneState.workflowTab === 'rollback'
+            ? renderProjectCloneRollbackPanel()
+            : projectCloneState.workflowTab === 'source'
+              ? renderProjectCloneSourceContextPanel(instance, { ports, volumeRows, relatedLbs, securityGroupRows, sourceFloatingIps })
+              : renderProjectCloneWorkflowPanel()}
+          ${shouldShowProjectCloneMessage() ? `<div class="${projectCloneMessageClass()}">${esc(projectCloneState.message)}</div>` : ''}
           <div class="session-actions" style="justify-content:flex-end">
             <button class="btn" onclick="closeProjectClonePlanner()">${isProjectCloneActive() || projectCloneState.submitting ? 'Close (clone continues)' : 'Close'}</button>
           </div>
@@ -1281,152 +2054,239 @@ function renderProjectCloneOverlay() {
         <div class="session-sub">Review the source workload, pick safe defaults, and stage the clone request.</div>
       </div>
       <div class="session-body">
-        <div class="session-panel">
-          <div class="session-panel-head">
-            <div class="session-panel-title">Source Summary</div>
-            <div class="session-panel-sub">${esc(instance.is_volume_backed ? 'Volume-backed instance' : 'Image / ephemeral instance')}</div>
-          </div>
-          <div class="session-panel-body">
-            <div class="summary-grid">
-              <div class="card">
-                <div class="card-title">Instance</div>
-                <div class="card-body">
-                  <div class="mrow"><span class="ml">Name</span><span class="mv">${esc(instance.name || instance.id || '—')}</span></div>
-                  <div class="mrow"><span class="ml">Status</span><span class="mv">${esc(instance.status || 'UNKNOWN')}</span></div>
-                  <div class="mrow"><span class="ml">Host</span><span class="mv">${esc(instance.compute_host || '—')}</span></div>
-                  <div class="mrow"><span class="ml">Flavor</span><span class="mv">${esc(flavor.name || flavor.id || '—')}</span></div>
+        <div class="clone-planner-topgrid">
+          <div class="session-panel">
+            <div class="session-panel-head">
+              <div class="session-panel-title">Source Summary</div>
+              <div class="session-panel-sub">${esc(instance.is_volume_backed ? 'Volume-backed instance' : 'Image / ephemeral instance')}</div>
+            </div>
+            <div class="session-panel-body">
+              <div class="summary-grid">
+                <div class="card">
+                  <div class="card-title">Instance</div>
+                  <div class="card-body">
+                    <div class="mrow"><span class="ml">Name</span><span class="mv">${esc(instance.name || instance.id || '—')}</span></div>
+                    <div class="mrow"><span class="ml">Status</span><span class="mv">${esc(instance.status || 'UNKNOWN')}</span></div>
+                    <div class="mrow"><span class="ml">Host</span><span class="mv">${esc(instance.compute_host || '—')}</span></div>
+                    <div class="mrow"><span class="ml">Flavor</span><span class="mv">${esc(projectCloneFlavorLabel(flavor))}</span></div>
+                    <div class="mrow"><span class="ml">Key pair</span><span class="mv">${esc(instance.key_name || 'None')}</span></div>
+                    <div class="mrow"><span class="ml">Server group</span><span class="mv">${esc(instance.server_group_name || instance.server_group_id || 'None')}</span></div>
+                  </div>
+                </div>
+                <div class="card">
+                  <div class="card-title">Network</div>
+                  <div class="card-body">
+                    <div class="mrow"><span class="ml">Ports</span><span class="mv">${esc(String(ports.length || 0))}</span></div>
+                    <div class="mrow"><span class="ml">Security groups</span><span class="mv">${esc(securityGroupRows.map((group) => group.name || group.id || '—').join(', ') || '—')}</span></div>
+                    <div class="mrow"><span class="ml">Load balancer links</span><span class="mv">${esc(String(relatedLbs.length || 0))}</span></div>
+                    <div class="mrow"><span class="ml">Boot source</span><span class="mv">${esc(rootVolume?.name || (instance.is_volume_backed ? 'Root volume present' : 'Image / ephemeral disk'))}</span></div>
+                  </div>
                 </div>
               </div>
-              <div class="card">
-                <div class="card-title">Network</div>
-                <div class="card-body">
-                  <div class="mrow"><span class="ml">Ports</span><span class="mv">${esc(String(ports.length || 0))}</span></div>
-                  <div class="mrow"><span class="ml">Security groups</span><span class="mv">${esc(securityGroups.join(', ') || '—')}</span></div>
-                  <div class="mrow"><span class="ml">Load balancer links</span><span class="mv">${esc(String(relatedLbs.length || 0))}</span></div>
-                  <div class="mrow"><span class="ml">Boot source</span><span class="mv">${esc(rootVolume?.name || (instance.is_volume_backed ? 'Root volume present' : 'Image / ephemeral disk'))}</span></div>
+              <div class="clone-preflight-grid" style="margin-top:4px">
+                <div class="finding compact ${instance.is_volume_backed ? 'good' : 'warn'}">
+                  <div class="finding-mark">${instance.is_volume_backed ? '✓' : '!'}</div>
+                  <div><strong>${esc(instance.is_volume_backed ? 'Boot volume clone path available.' : 'Boot volume is not visible.' )}</strong>${esc(instance.is_volume_backed ? ' The safest default is to clone the boot volume and create fresh Neutron ports.' : ' This planner falls back to a snapshot-style path until a backend clone API exists.')}</div>
+                </div>
+                <div class="finding compact ${flavorReady ? 'good' : 'warn'}">
+                  <div class="finding-mark">${flavorReady ? '✓' : '!'}</div>
+                  <div><strong>${esc(flavorReady ? 'Flavor is resolvable.' : 'Flavor is missing or unresolved.')}</strong>${esc(flavorReady ? ` Clone will request flavor ${(flavorOptions.find((item) => item.id === projectCloneState.flavorId)?.name) || flavor.name || projectCloneState.flavorId || flavor.id || 'source flavor'}.` : ' Clone launch is blocked until the selected flavor can be resolved from Nova.')}</div>
+                </div>
+                <div class="finding compact ${userDataReadable ? 'good' : 'warn'}">
+                  <div class="finding-mark">${userDataReadable ? '✓' : '!'}</div>
+                  <div><strong>${esc(userDataReadable ? 'Source user_data is readable.' : 'Source user_data cannot be preserved for this user.')}</strong>${esc(userDataReadable ? ` ${userDataPresent ? 'Admin-visible user_data can be preserved or replaced at clone time.' : 'The field is readable but empty, so preserve will effectively send no user_data.'}` : ' Regular users can still replace it with new user_data or send none.')}</div>
+                </div>
+                ${!clonePreflightReady ? `<div class="finding compact warn"><div class="finding-mark">!</div><div><strong>Clone preflight is still loading.</strong>${esc(' Launch stays disabled until the planner has loaded full source detail and flavor choices.')}</div></div>` : ''}
+                ${!projectCloneState.sourceLoading && projectCloneNeedsDetail(instance) ? `<div class="finding compact bad"><div class="finding-mark">!</div><div><strong>Source detail is incomplete.</strong>${esc(' Retry loading instance detail so the planner can resolve Neutron ports and user-data visibility.')} <button class="btn" style="margin-left:6px;padding:1px 7px;font-size:11px" onclick="ensureProjectCloneSourceDetail('${escAttr(instance.id || '')}', true)">Retry</button></div></div>` : ''}
+                ${relatedLbs.length ? `<div class="finding compact warn"><div class="finding-mark">!</div><div><strong>Load balancer membership will not be cloned automatically.</strong>${esc(` ${relatedLbs.length} load balancer relationship(s) were detected on the source instance.`)}</div></div>` : ''}
+              </div>
+              <div class="project-clone-field" style="margin-top:10px">
+                <span>Network and Security Overrides</span>
+                <div class="clone-port-edit-list">
+                  ${ports.length ? ports.map((port, index) => {
+                    const subnetLabels = (port.subnets || []).map((subnet) => {
+                      const router = subnet?.router?.name || subnet?.router?.id || port.gateway_target || '';
+                      return [subnet?.name || subnet?.cidr || subnet?.id || '', router ? `via ${router}` : ''].filter(Boolean).join(' ');
+                    }).filter(Boolean);
+                    const selectedNetworkId = projectClonePortTargetNetworkId(port);
+                    const selectedNetworkName = projectCloneTargetNetworkName(selectedNetworkId);
+                    const fixedIpValue = projectClonePortFixedIp(port);
+                    const fixedIpError = projectClonePortIpValidation(port);
+                    const networkChoices = projectNetworks.length
+                      ? projectNetworks
+                      : [{ id: port.network_id || '', name: port.network_name || port.network_id || 'network' }];
+                    const selectedPortSecurityGroups = projectClonePortSelectedSecurityGroups(port);
+                    return `<div class="clone-port-edit-card">
+                      <div class="clone-port-edit-head">
+                        <div class="clone-port-edit-title">${esc(`Port ${index + 1}`)}</div>
+                        <div class="hint mono">${esc(port.network_name || port.network_id || '—')}</div>
+                      </div>
+                      <div class="hint" style="margin-bottom:6px">${esc(`Source fixed IPs: ${(port.fixed_ips || []).join(', ') || 'Auto'}${subnetLabels.length ? ` · ${subnetLabels.join(', ')}` : ''}`)}</div>
+                      <select class="clone-inline-select" data-clone-field="port-network-${escAttr(port.id || '')}" onchange="updateProjectClonePortOverride('${escAttr(port.id || '')}','networkId', this.value)">
+                        ${networkChoices.map((network) => `<option value="${escAttr(network.id || '')}" ${network.id === selectedNetworkId ? 'selected' : ''}>${esc(network.name && network.id ? `${network.name} (${network.id})` : (network.name || network.id || 'network'))}</option>`).join('')}
+                      </select>
+                      <div class="hint" style="margin-top:4px">${esc(selectedNetworkName)}</div>
+                      <input class="clone-inline-input mono ${fixedIpError ? 'invalid' : ''}" data-clone-field="port-fixed-${escAttr(port.id || '')}" type="text" placeholder="auto" value="${escAttr(fixedIpValue)}" oninput="updateProjectClonePortOverride('${escAttr(port.id || '')}','fixedIp', this.value)">
+                      <div class="hint">${esc(subnetLabels.join(', ') || port.gateway_target || 'Auto subnet selection')}</div>
+                      ${fixedIpError ? `<div class="clone-inline-error">${esc(fixedIpError)}</div>` : ''}
+                      <div class="project-clone-field" style="margin-top:8px">
+                        <span>Security groups for this port</span>
+                        <select class="dv-filter" onchange="updateProjectClonePortSecurityGroupFromPicker('${escAttr(port.id || '')}', this.value); this.value='';">
+                          <option value="">Add security group…</option>
+                          ${securityGroupOptions
+                            .filter((item) => !projectClonePortSecurityGroupIds(port).includes(item.id))
+                            .map((item) => `<option value="${escAttr(item.id || '')}">${esc(projectCloneSecurityGroupLabel(item))}</option>`)
+                            .join('')}
+                        </select>
+                      </div>
+                      <div class="clone-sg-chiplist">
+                        ${selectedPortSecurityGroups.length
+                          ? selectedPortSecurityGroups.map((group) => `<button class="clone-sg-chip" type="button" onclick="removeProjectClonePortSecurityGroup('${escAttr(port.id || '')}','${escAttr(group.id || '')}')">${esc(projectCloneSecurityGroupLabel(group))} <span>×</span></button>`).join('')
+                          : '<span class="hint">No security groups selected for this port.</span>'}
+                      </div>
+                    </div>`;
+                  }).join('') : '<div class="hint">No Neutron ports are loaded yet for this instance.</div>'}
                 </div>
               </div>
             </div>
-            <div class="finding ${instance.is_volume_backed ? 'good' : 'warn'}" style="margin-top:4px">
-              <div class="finding-mark">${instance.is_volume_backed ? '✓' : '!'}</div>
-              <div><strong>${esc(instance.is_volume_backed ? 'Boot volume clone path available.' : 'Boot volume is not visible.' )}</strong>${esc(instance.is_volume_backed ? ' The safest default is to clone the boot volume and create fresh Neutron ports.' : ' This planner falls back to a snapshot-style path until a backend clone API exists.')}</div>
+          </div>
+
+          <div class="session-panel">
+            <div class="session-panel-head">
+              <div class="session-panel-title">Clone Settings</div>
             </div>
-            <div class="finding ${flavorReady ? 'good' : 'warn'}" style="margin-top:4px">
-              <div class="finding-mark">${flavorReady ? '✓' : '!'}</div>
-              <div><strong>${esc(flavorReady ? 'Flavor is resolvable.' : 'Flavor is missing or unresolved.')}</strong>${esc(flavorReady ? ` Clone will request flavor ${flavor.name || flavor.id || 'source flavor'}.` : ' Clone launch is blocked until the source instance flavor can be resolved from Nova.')}</div>
+            <div class="session-panel-body">
+              <label class="project-clone-field">
+                <span>New server name</span>
+                <input id="project-clone-name" data-clone-field="newName" class="dv-filter" type="text" value="${escAttr(projectCloneState.newName)}" oninput="updateProjectCloneField('newName', this.value)">
+              </label>
+              <label class="project-clone-field">
+                <span>Flavor</span>
+                <select data-clone-field="flavorId" class="dv-filter" onchange="updateProjectCloneField('flavorId', this.value)">
+                  ${(flavorOptions.length ? flavorOptions : [{ id: projectCloneState.flavorId || flavor.id || '', name: flavor.name || projectCloneState.flavorId || 'source flavor' }]).map((item) => `<option value="${escAttr(item.id || '')}" ${item.id === projectCloneState.flavorId ? 'selected' : ''}>${esc(projectCloneFlavorLabel(item))}${item.vcpus ? ` · ${item.vcpus} vCPU` : ''}${item.ram_mb ? ` · ${item.ram_mb} MB` : ''}</option>`).join('')}
+                </select>
+              </label>
+              ${projectCloneState.flavorsLoading ? '<div class="hint" style="margin-top:6px">Loading flavor choices…</div>' : ''}
+              ${projectCloneState.flavorsError ? `<div class="finding compact warn" style="margin-top:4px"><div class="finding-mark">!</div><div><strong>Flavor list could not be loaded.</strong>${esc(` ${projectCloneState.flavorsError}`)}</div></div>` : ''}
+              <label class="project-clone-field">
+                <span>Key pair</span>
+                <select data-clone-field="keyName" class="dv-filter" onchange="updateProjectCloneField('keyName', this.value)">
+                  <option value="" ${!projectCloneState.keyName ? 'selected' : ''}>No key pair</option>
+                  ${keypairSelectOptions.map((item) => `<option value="${escAttr(item.name || '')}" ${item.name === projectCloneState.keyName ? 'selected' : ''}>${esc(projectCloneKeypairLabel(item))}</option>`).join('')}
+                </select>
+              </label>
+              ${projectCloneState.keypairsLoading ? '<div class="hint" style="margin-top:6px">Loading key pairs…</div>' : ''}
+              ${projectCloneState.keypairsError ? `<div class="finding compact warn" style="margin-top:4px"><div class="finding-mark">!</div><div><strong>Key pair list could not be loaded.</strong>${esc(` ${projectCloneState.keypairsError}`)}</div></div>` : ''}
+              <label class="project-clone-field">
+                <span>Nova affinity group</span>
+                <select data-clone-field="serverGroupId" class="dv-filter" onchange="updateProjectCloneField('serverGroupId', this.value)">
+                  <option value="" ${!projectCloneState.serverGroupId ? 'selected' : ''}>No server group</option>
+                  ${serverGroupSelectOptions.map((item) => `<option value="${escAttr(item.id || '')}" ${item.id === projectCloneState.serverGroupId ? 'selected' : ''}>${esc(projectCloneServerGroupLabel(item))}</option>`).join('')}
+                </select>
+              </label>
+              ${projectCloneState.serverGroupsLoading ? '<div class="hint" style="margin-top:6px">Loading server groups…</div>' : ''}
+              ${projectCloneState.serverGroupsError ? `<div class="finding compact warn" style="margin-top:4px"><div class="finding-mark">!</div><div><strong>Server groups could not be loaded.</strong>${esc(` ${projectCloneState.serverGroupsError}`)}</div></div>` : ''}
+              <label class="project-clone-field">
+                <span>User data</span>
+                <select data-clone-field="userDataMode" class="dv-filter" onchange="updateProjectCloneField('userDataMode', this.value)">
+                  <option value="preserve" ${projectCloneState.userDataMode === 'preserve' ? 'selected' : ''} ${userDataReadable ? '' : 'disabled'}>Preserve source user_data</option>
+                  <option value="replace" ${projectCloneState.userDataMode === 'replace' ? 'selected' : ''}>Provide new user_data</option>
+                  <option value="none" ${projectCloneState.userDataMode === 'none' ? 'selected' : ''}>No user_data</option>
+                </select>
+              </label>
+              <div class="hint" style="margin-top:6px">${esc(userDataReadable ? (userDataPresent ? 'Admin-visible source user_data can be preserved directly.' : 'Source user_data is readable but empty.') : 'Source user_data is not visible to this user. Preserve is disabled.')}</div>
+              ${projectCloneState.userDataMode === 'replace' ? `<label class="project-clone-field">
+                <span>Replacement user_data</span>
+                <textarea id="project-clone-userdata" data-clone-field="userDataText" class="clone-userdata-text" oninput="updateProjectCloneField('userDataText', this.value)">${esc(projectCloneState.userDataText)}</textarea>
+              </label>` : ''}
+              <div class="hint" style="margin-top:6px">Clone-created resources are prefixed with vv- or vibeview- for attribution and cleanup.</div>
+              <label class="project-clone-check"><input data-clone-field="cloneDataVolumes" type="checkbox" ${projectCloneState.cloneDataVolumes ? 'checked' : ''} onchange="updateProjectCloneField('cloneDataVolumes', this.checked)"> Clone attached data volumes when safe</label>
+              <label class="project-clone-check"><input data-clone-field="createFloatingIp" type="checkbox" ${projectCloneState.createFloatingIp ? 'checked' : ''} onchange="updateProjectCloneField('createFloatingIp', this.checked)"> Create a new floating IP for the clone by default</label>
+              <label class="project-clone-check"><input data-clone-field="powerOn" type="checkbox" ${projectCloneState.powerOn ? 'checked' : ''} onchange="updateProjectCloneField('powerOn', this.checked)"> Boot the new server after create</label>
+              <label class="project-clone-check"><input data-clone-field="keepMetadata" type="checkbox" ${projectCloneState.keepMetadata ? 'checked' : ''} onchange="updateProjectCloneField('keepMetadata', this.checked)"> Preserve instance metadata where possible</label>
             </div>
-            ${relatedLbs.length ? `<div class="finding warn" style="margin-top:4px"><div class="finding-mark">!</div><div><strong>Load balancer membership will not be cloned automatically.</strong>${esc(` ${relatedLbs.length} load balancer relationship(s) were detected on the source instance.`)}</div></div>` : ''}
           </div>
         </div>
 
         <div class="session-panel">
           <div class="session-panel-head">
-            <div class="session-panel-title">Network Plan</div>
-            <div class="session-panel-sub">Fresh Neutron ports and IP assignments are expected for the clone.</div>
+            <div class="session-panel-title">Deployment Comparison</div>
+            <div class="session-panel-sub">Compare the source instance to the clone settings that will be requested.</div>
           </div>
           <div class="session-panel-body">
-            <table class="data-table" style="margin-bottom:0">
-              <thead><tr><th>Port</th><th>Network</th><th>Fixed IPs</th><th>Subnet / Router</th><th>Floating IPs</th><th>Security Groups</th></tr></thead>
+            <table class="data-table clone-compare-table" style="margin-bottom:0">
+              <thead><tr><th>Aspect</th><th>Source</th><th>Clone</th></tr></thead>
               <tbody>
-                ${ports.length ? ports.map((port) => {
-                  const subnetLabels = (port.subnets || []).map((subnet) => {
-                    const router = subnet?.router?.name || subnet?.router?.id || port.gateway_target || '';
-                    return [subnet?.name || subnet?.cidr || subnet?.id || '', router ? `via ${router}` : ''].filter(Boolean).join(' ');
-                  }).filter(Boolean);
-                  const floatingIps = (port.floating_ips || []).map((ip) => (typeof ip === 'string' ? ip : (ip.address || ip.floating_ip_address || ''))).filter(Boolean);
-                  const portSecurityGroups = [...new Set(port.security_group_names || port.security_groups || [])].filter(Boolean);
-                  return `<tr>
-                    <td style="font-family:monospace;font-size:11px">${esc(port.id || '—')}</td>
-                    <td>${esc(port.network_name || port.network_id || '—')}</td>
-                    <td class="mono">${esc((port.fixed_ips || []).join(', ') || '—')}</td>
-                    <td>${esc(subnetLabels.join(', ') || port.gateway_target || '—')}</td>
-                    <td class="mono">${esc(floatingIps.join(', ') || 'None')}</td>
-                    <td>${esc(portSecurityGroups.join(', ') || '—')}</td>
-                  </tr>`;
-                }).join('') : '<tr><td colspan="6" style="color:var(--dim)">No Neutron port metadata is available for this instance.</td></tr>'}
+                <tr>
+                  <td>Name</td>
+                  <td>${esc(instance.name || instance.id || '—')}</td>
+                  <td>${esc(projectCloneState.newName || '—')}</td>
+                </tr>
+                <tr>
+                  <td>Flavor</td>
+                  <td>${esc(projectCloneFlavorLabel(flavor))}</td>
+                  <td>${esc(projectCloneFlavorIntentLabel(instance))}</td>
+                </tr>
+                <tr>
+                  <td>Key Pair</td>
+                  <td>${esc(instance.key_name || 'None')}</td>
+                  <td>${esc(projectCloneKeypairIntentLabel(instance))}</td>
+                </tr>
+                <tr>
+                  <td>Server Group</td>
+                  <td>${esc(instance.server_group_name || instance.server_group_id || 'None')}</td>
+                  <td>${esc(projectCloneServerGroupIntentLabel(instance))}</td>
+                </tr>
+                <tr>
+                  <td>Boot Source</td>
+                  <td>${esc(rootVolume?.name || (instance.is_volume_backed ? 'Root volume' : 'Image / ephemeral'))}</td>
+                  <td>${esc(instance.is_volume_backed ? 'Clone root volume' : 'Snapshot image then build')}</td>
+                </tr>
+                <tr>
+                  <td>Data Volumes</td>
+                  <td>${esc(String(volumeRows.filter((item) => item.role === 'Data volume').length))}</td>
+                  <td>${esc(projectCloneState.cloneDataVolumes ? `${cloneableDataVolumes.length} cloned` : 'Skipped by setting')}</td>
+                </tr>
+                <tr>
+                  <td>User Data</td>
+                  <td>${esc(userDataReadable ? (userDataPresent ? 'Readable and present' : 'Readable but empty') : 'Not readable')}</td>
+                  <td>${esc(projectCloneUserDataIntentLabel(instance))}</td>
+                </tr>
+                <tr>
+                  <td>Metadata</td>
+                  <td>${esc(Object.keys(instance.metadata || {}).length ? 'Present' : 'None visible')}</td>
+                  <td>${esc(projectCloneMetadataIntentLabel())}</td>
+                </tr>
+                <tr>
+                  <td>Power State</td>
+                  <td>${esc(instance.status || 'UNKNOWN')}</td>
+                  <td>${esc(projectClonePowerIntentLabel())}</td>
+                </tr>
+                <tr>
+                  <td>Floating IPs</td>
+                  <td class="mono">${esc(sourceFloatingIps.join(', ') || 'None')}</td>
+                  <td>${esc(projectCloneFloatingIpIntentLabel(sourceFloatingIps))}</td>
+                </tr>
+                <tr>
+                  <td>Security Groups</td>
+                  <td>${esc(securityGroupRows.map((group) => projectCloneSecurityGroupLabel(group)).join(', ') || '—')}</td>
+                  <td>${esc(ports.length ? 'Per-port overrides below' : 'None')}</td>
+                </tr>
+                ${ports.map((port, index) => `<tr>
+                  <td>${esc(`Port ${index + 1}`)}</td>
+                  <td>${esc(projectClonePortSourceSummary(port))}</td>
+                  <td>${esc(projectClonePortTargetSummary(port))}</td>
+                </tr>`).join('')}
               </tbody>
             </table>
-            <div class="finding good" style="margin-top:4px">
-              <div class="finding-mark">✓</div>
-              <div><strong>Clone network posture.</strong>${esc(' The new server should receive fresh ports, MAC addresses, fixed IPs, and floating IP associations should be reattached deliberately rather than copied blindly.')}</div>
-            </div>
-            <div class="finding ${projectCloneState.createFloatingIp ? 'good' : 'warn'}" style="margin-top:4px">
-              <div class="finding-mark">${projectCloneState.createFloatingIp ? '✓' : '!'}</div>
-              <div><strong>${esc(projectCloneState.createFloatingIp ? 'New floating IP will be requested.' : 'Floating IP creation is disabled.')}</strong>${esc(projectCloneState.createFloatingIp
-                ? (sourceFloatingIps.length
-                  ? ` Source instance currently exposes ${sourceFloatingIps.join(', ')}; the clone should get a fresh external address instead of reusing one.`
-                  : ' The clone will ask for a new external address if north-south access is needed.')
-                : ' The clone will come up without an external address, and operators can reassociate or allocate one later.')}</div>
-            </div>
           </div>
         </div>
 
-        <div class="session-panel">
-          <div class="session-panel-head">
-            <div class="session-panel-title">Security Group Plan</div>
-            <div class="session-panel-sub">Carry forward only the groups that still make sense for the cloned workload.</div>
-          </div>
-          <div class="session-panel-body">
-            <table class="data-table" style="margin-bottom:0">
-              <thead><tr><th>Security Group</th><th>Networks</th><th>Attached Ports</th><th>Clone Guidance</th></tr></thead>
-              <tbody>
-                ${securityGroupRows.length ? securityGroupRows.map((group) => `<tr>
-                  <td>${esc(group.name)}</td>
-                  <td>${esc(group.networks.join(', ') || '—')}</td>
-                  <td class="mono">${esc(group.attachedPorts.join(', ') || '—')}</td>
-                  <td>${esc(group.portCount > 1 ? 'Shared across multiple source ports; confirm the clone still needs the same east-west reachability.' : 'Present on a single source port; safe default is to preserve until application cutover is reviewed.')}</td>
-                </tr>`).join('') : '<tr><td colspan="4" style="color:var(--dim)">No security groups are attached to the source instance ports.</td></tr>'}
-              </tbody>
-            </table>
-            <div class="finding warn" style="margin-top:4px">
-              <div class="finding-mark">!</div>
-              <div><strong>Security review still matters.</strong>${esc(' Reusing the same security groups is a reasonable default, but ingress rules, floating IP exposure, and load balancer membership should be validated before the clone is put into service.')}</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="session-panel">
-          <div class="session-panel-head">
-            <div class="session-panel-title">Clone Settings</div>
-          </div>
-          <div class="session-panel-body">
-            <label class="project-clone-field">
-              <span>New server name</span>
-              <input id="project-clone-name" data-clone-field="newName" class="dv-filter" type="text" value="${escAttr(projectCloneState.newName)}" oninput="updateProjectCloneField('newName', this.value)">
-            </label>
-            <div class="hint" style="margin-top:6px">Clone-created resources are prefixed with vv- or vibeview- for attribution and cleanup.</div>
-            <label class="project-clone-check"><input data-clone-field="cloneDataVolumes" type="checkbox" ${projectCloneState.cloneDataVolumes ? 'checked' : ''} onchange="updateProjectCloneField('cloneDataVolumes', this.checked)"> Clone attached data volumes when safe</label>
-            <label class="project-clone-check"><input data-clone-field="createFloatingIp" type="checkbox" ${projectCloneState.createFloatingIp ? 'checked' : ''} onchange="updateProjectCloneField('createFloatingIp', this.checked)"> Create a new floating IP for the clone by default</label>
-            <label class="project-clone-check"><input data-clone-field="powerOn" type="checkbox" ${projectCloneState.powerOn ? 'checked' : ''} onchange="updateProjectCloneField('powerOn', this.checked)"> Boot the new server after create</label>
-            <label class="project-clone-check"><input data-clone-field="keepMetadata" type="checkbox" ${projectCloneState.keepMetadata ? 'checked' : ''} onchange="updateProjectCloneField('keepMetadata', this.checked)"> Preserve instance metadata where possible</label>
-          </div>
-        </div>
-
-        <div class="session-panel">
-          <div class="session-panel-head">
-            <div class="session-panel-title">Volume Plan</div>
-            <div class="session-panel-sub">${esc(`${cloneableDataVolumes.length} cloneable data volume(s), ${skippedDataVolumes.length} skipped`)}</div>
-          </div>
-          <div class="session-panel-body">
-            <table class="data-table" style="margin-bottom:0">
-              <thead><tr><th>Volume</th><th>Role</th><th>Action</th><th>Note</th></tr></thead>
-              <tbody>
-                ${volumeRows.length ? volumeRows.map((item) => `<tr>
-                  <td>${esc(item.name)}</td>
-                  <td>${esc(item.role)}</td>
-                  <td>${esc(item.role === 'Root volume' ? 'Clone' : (projectCloneState.cloneDataVolumes && item.cloneable ? 'Clone' : 'Skip'))}</td>
-                  <td>${esc(item.reason)}</td>
-                </tr>`).join('') : '<tr><td colspan="4" style="color:var(--dim)">No attached volume metadata is available for this instance.</td></tr>'}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        ${projectCloneState.message ? `<div class="${projectCloneMessageClass()}">${esc(projectCloneState.message)}</div>` : ''}
+        ${shouldShowProjectCloneMessage() ? `<div class="${projectCloneMessageClass()}">${esc(projectCloneState.message)}</div>` : ''}
 
         <div class="session-actions" style="justify-content:flex-end">
           <button class="btn" onclick="closeProjectClonePlanner()">${isProjectCloneActive() || projectCloneState.submitting ? 'Close (clone continues)' : 'Close'}</button>
-          <button class="btn primary" onclick="submitProjectClonePlanner()" ${(!flavorReady || projectCloneState.submitting || isProjectCloneActive()) ? 'disabled' : ''}>${projectCloneState.submitting ? 'Launching Clone…' : isProjectCloneActive() ? 'Clone Busy…' : (!flavorReady ? 'Flavor Missing' : 'Launch Clone')}</button>
+          <button class="btn primary" onclick="submitProjectClonePlanner()" ${(!clonePreflightReady || !flavorReady || cloneValidationErrors.length || projectCloneState.submitting || isProjectCloneActive()) ? 'disabled' : ''}>${projectCloneLaunchLabel(instance)}</button>
         </div>
       </div>
     </div>
