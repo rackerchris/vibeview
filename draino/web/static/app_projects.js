@@ -267,6 +267,7 @@ function projectHasBackgroundLoading(projectId, activeSection = activeProjectVie
 function projectOverviewStats(projectId = selectedProjectId) {
   const cache = projectSectionCache(projectId);
   const overview = cache.overview?.overview || {};
+  const overviewInstanceSummary = overview.instance_summary || {};
   const instances = cache.instances?.instances || [];
   const networking = cache.networking || {};
   const storage = cache.storage || {};
@@ -276,18 +277,20 @@ function projectOverviewStats(projectId = selectedProjectId) {
   const activeInstances = instances.filter((item) => item.status === 'ACTIVE');
   const errorInstances = instances.filter((item) => item.status === 'ERROR');
   const networkingLoaded = ['networks', 'routers', 'ports', 'floating_ips', 'load_balancers'].every((key) => Array.isArray(networking[key]));
+  const overviewInstancesReady = overviewInstanceSummary.instance_count != null;
+  const instancesLoaded = Boolean(cache.instances) || overviewInstancesReady;
   return {
-    instancesLoaded: Boolean(cache.instances),
+    instancesLoaded,
     networkingLoaded,
     storageLoaded: Boolean(cache.storage),
     securityLoaded: Boolean(cache.security),
     quotaLoaded: Boolean(cache.quota || cache.overview),
-    instanceCount: instances.length,
-    activeInstanceCount: activeInstances.length,
-    errorInstanceCount: errorInstances.length,
-    cloneCandidateCount: activeInstances.filter((item) => !String(item.name || '').startsWith('amphora-')).length,
-    vcpuCount: instances.reduce((sum, item) => sum + Number(item.vcpus || 0), 0),
-    ramMb: instances.reduce((sum, item) => sum + Number(item.ram_mb || 0), 0),
+    instanceCount: cache.instances ? instances.length : Number(overviewInstanceSummary.instance_count || 0),
+    activeInstanceCount: cache.instances ? activeInstances.length : Number(overviewInstanceSummary.active_instance_count || 0),
+    errorInstanceCount: cache.instances ? errorInstances.length : Number(overviewInstanceSummary.error_instance_count || 0),
+    cloneCandidateCount: cache.instances ? activeInstances.filter((item) => !String(item.name || '').startsWith('amphora-')).length : Number(overviewInstanceSummary.clone_candidate_count || 0),
+    vcpuCount: cache.instances ? instances.reduce((sum, item) => sum + Number(item.vcpus || 0), 0) : Number(overviewInstanceSummary.vcpu_count || 0),
+    ramMb: cache.instances ? instances.reduce((sum, item) => sum + Number(item.ram_mb || 0), 0) : Number(overviewInstanceSummary.ram_mb || 0),
     networkCount: (networking.networks || []).length,
     routerCount: (networking.routers || []).length,
     portCount: (networking.ports || []).length,

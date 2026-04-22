@@ -699,6 +699,83 @@ def get_project_instances(auth: openstack_ops.OpenStackAuth | None, project_id: 
     return result
 
 
+def get_project_instance_summary(auth: openstack_ops.OpenStackAuth | None, project_id: str = "") -> dict:
+    """Return aggregate instance stats for a project without building full instance rows."""
+    conn = openstack_ops._conn(auth=auth)
+    project_names = _project_names(conn)
+    flavor_cache: dict[str, dict] = {}
+    instance_count = 0
+    active_instance_count = 0
+    error_instance_count = 0
+    clone_candidate_count = 0
+    vcpu_count = 0
+    ram_mb = 0
+    host_counts: dict[str, int] = defaultdict(int)
+    top_host = ""
+    top_host_pct = 0.0
+
+    try:
+        servers = list(openstack_ops._iter_servers(conn, all_projects=True, details=True, project_id=project_id)) if project_id else list(openstack_ops._iter_servers(conn, all_projects=True, details=True))
+    except TypeError:
+        servers = list(openstack_ops._iter_servers(conn, all_projects=True, details=True))
+    if project_id:
+        servers = [
+            server for server in servers
+            if (openstack_ops._server_project_id(server) or "unknown") == project_id
+        ]
+
+    for server in servers:
+        if openstack_ops._server_deleted(server):
+            continue
+        data = _obj_dict(server)
+        resolved_project_id = openstack_ops._server_project_id(server) or "unknown"
+        if project_id and resolved_project_id != project_id:
+            continue
+        instance_count += 1
+        status = str(getattr(server, "status", None) or data.get("status") or "").upper() or "UNKNOWN"
+        if status == "ACTIVE":
+            active_instance_count += 1
+            if not str(getattr(server, "name", None) or data.get("name") or "").startswith("amphora-"):
+                clone_candidate_count += 1
+        elif status == "ERROR":
+            error_instance_count += 1
+
+        flavor_ref = getattr(server, "flavor", None) or data.get("flavor") or {}
+        flavor_key = str(
+            getattr(flavor_ref, "id", None)
+            or (flavor_ref.get("id") if isinstance(flavor_ref, dict) else "")
+            or getattr(flavor_ref, "name", None)
+            or (flavor_ref.get("name") if isinstance(flavor_ref, dict) else "")
+            or ""
+        )
+        if flavor_key not in flavor_cache:
+            flavor_cache[flavor_key] = openstack_ops._resolve_flavor_data(conn, flavor_ref)
+        flavor = flavor_cache.get(flavor_key) or {}
+        vcpu_count += int(flavor.get("vcpus") or 0)
+        ram_mb += int(flavor.get("ram_mb") or 0)
+
+        host = openstack_ops._server_host(server) or ""
+        if host:
+            host_counts[host] += 1
+
+    if host_counts and instance_count:
+        top_host, top_count = max(host_counts.items(), key=lambda item: item[1])
+        top_host_pct = round((top_count / instance_count) * 100, 1)
+
+    return {
+        "instance_count": instance_count,
+        "active_instance_count": active_instance_count,
+        "error_instance_count": error_instance_count,
+        "clone_candidate_count": clone_candidate_count,
+        "vcpu_count": vcpu_count,
+        "ram_mb": ram_mb,
+        "host_count": len(host_counts),
+        "top_host": top_host,
+        "top_host_pct": top_host_pct,
+        "project_name": project_names.get(project_id) or project_id,
+    }
+
+
 def _search_score(query: str, fields: list[object]) -> int:
     needle = str(query or "").strip().lower()
     if not needle:
@@ -1190,12 +1267,16 @@ def get_project_inventory(project_id: str, auth: openstack_ops.OpenStackAuth | N
     payload = {"summary": summary}
     normalized = str(section or "instances").strip().lower()
     if normalized == "overview":
-        instances = get_project_instances(auth, project_id=project_id)
+        instance_summary = get_project_instance_summary(auth, project_id=project_id)
         quotas = _backfill_compute_quota_usage(project_id, auth, get_project_quota_summary(project_id, auth))
-        placement = _project_instance_placement(instances)
         payload["overview"] = {
+            "instance_summary": instance_summary,
             "quotas": quotas,
-            "placement": placement or None,
+            "placement": {
+                "host_count": instance_summary.get("host_count", 0),
+                "top_host": instance_summary.get("top_host", ""),
+                "top_host_pct": instance_summary.get("top_host_pct", 0),
+            } if instance_summary.get("host_count") else None,
         }
         return payload
     if normalized == "instances":
