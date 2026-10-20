@@ -41,6 +41,7 @@ def run_workflow(
     audit_cb: Optional[AuditCb] = None,
     k8s_auth=None,
     openstack_auth=None,
+    lock_lost_fn=None,
 ) -> None:
     if state.compute_status == "disabled" and (state.vm_count or 0) == 0 and (state.amphora_count or 0) == 0:
         state.phase = NodePhase.COMPLETE
@@ -60,12 +61,21 @@ def run_workflow(
         abort_prefix="Evacuation aborted",
     )
 
+    def lock_abort(key: str) -> bool:
+        if lock_lost_fn is None or not lock_lost_fn():
+            return False
+        ctx.abort(key, "operation lock lost — another operator owns this action; aborting to avoid a double run")
+        return True
+
     state.phase = NodePhase.RUNNING
     state.instances = []
     state.nova_evacuation_status = "in_progress"
     state.nova_evacuation_detail = "disabling nova and evacuating instances"
     state.init_steps()
     update_cb()
+
+    if lock_abort("disable_nova"):
+        return
 
     ctx.step_set("disable_nova", StepStatus.RUNNING)
     try:
@@ -174,6 +184,8 @@ def run_workflow(
                     inst.migration_status = "failed"
                     ctx.log(f"Server '{inst.name}' entered ERROR state")
 
+            if lock_abort("migrate_vms"):
+                return
             done_n = sum(1 for i in vms if i.migration_status == "complete")
             failed_n = sum(1 for i in vms if i.migration_status == "failed")
             state.nova_evacuation_detail = f"nova disabled; migrating instances ({done_n}/{len(vms)} complete, {failed_n} failed)"
@@ -261,6 +273,8 @@ def run_workflow(
             state.vm_count = 0
             state.amphora_count = 0
             break
+        if lock_abort("await_empty"):
+            return
         time_module.sleep(POLL_INTERVAL)
     else:
         remaining_names = _remaining_instance_names(openstack_ops, state.hypervisor, auth=openstack_auth)

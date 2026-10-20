@@ -31,6 +31,14 @@ The current design materially reduces prior reliance on shared SSH-based host op
 - the current model relies on shared in-cluster trust material rather than per-node identities
 - compromise of the web tier, supporting credentials, or agent trust path could expose broad reboot capability across managed nodes
 
+> Update (2026-10): partially mitigated since this memo was written. The node-agent TLS
+> server key is no longer mounted in the web pod (split secrets: `-node-agent-tls` vs
+> `-node-agent-token`); a `NetworkPolicy` restricts agent ingress to web pods (default on);
+> reboots are audited agent-side with the forwarded operator identity, with replay
+> protection; and agents run seccomp `RuntimeDefault` with a read-only root filesystem.
+> Residual exposure: a web-pod breach still yields the shared cluster-wide token and thus
+> reboot capability on all agent nodes. Full mTLS / per-node identities remain deferred.
+
 ## Known Risks Accepted Under This Memo
 
 Management acknowledges and accepts the following risks for the approved scope and duration of use:

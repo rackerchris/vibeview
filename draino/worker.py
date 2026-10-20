@@ -21,6 +21,7 @@ def run_workflow(
     audit_cb: Optional[AuditCb] = None,
     k8s_auth: Optional[k8s_ops.K8sAuth] = None,
     openstack_auth: Optional[openstack_ops.OpenStackAuth] = None,
+    lock_lost_fn: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Execute the full evacuation workflow. Designed to run in a daemon thread."""
     workflows_evacuate.run_workflow(
@@ -33,6 +34,7 @@ def run_workflow(
         audit_cb=audit_cb,
         k8s_auth=k8s_auth,
         openstack_auth=openstack_auth,
+        lock_lost_fn=lock_lost_fn,
     )
 
 
@@ -46,6 +48,7 @@ def run_reboot(
     issue_reboot_fn: Optional[Callable[..., None]] = None,
     phase_already_claimed: bool = False,
     operator: Optional[str] = None,
+    lock_lost_fn: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Issue a reboot and track downtime.  Runs in a daemon thread."""
     workflows_maintenance.run_reboot(
@@ -59,6 +62,7 @@ def run_reboot(
         k8s_auth=k8s_auth,
         phase_already_claimed=phase_already_claimed,
         operator=operator,
+        lock_lost_fn=lock_lost_fn,
     )
 
 
@@ -69,6 +73,7 @@ def run_drain_quick(
     audit_cb: Optional[AuditCb] = None,
     k8s_auth: Optional[k8s_ops.K8sAuth] = None,
     openstack_auth: Optional[openstack_ops.OpenStackAuth] = None,
+    lock_lost_fn: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Cordon, optionally disable Nova, then drain pods.  Runs in a daemon thread."""
     workflows_maintenance.run_drain_quick(
@@ -80,6 +85,7 @@ def run_drain_quick(
         audit_cb=audit_cb,
         k8s_auth=k8s_auth,
         openstack_auth=openstack_auth,
+        lock_lost_fn=lock_lost_fn,
     )
 
 
@@ -90,6 +96,7 @@ def run_undrain(
     audit_cb: Optional[AuditCb] = None,
     k8s_auth: Optional[k8s_ops.K8sAuth] = None,
     openstack_auth: Optional[openstack_ops.OpenStackAuth] = None,
+    lock_lost_fn: Optional[Callable[[], bool]] = None,
 ) -> None:
     """Enable Nova (if compute) then uncordon.  Runs in a daemon thread."""
     workflows_maintenance.run_undrain(
@@ -101,4 +108,5 @@ def run_undrain(
         audit_cb=audit_cb,
         k8s_auth=k8s_auth,
         openstack_auth=openstack_auth,
+        lock_lost_fn=lock_lost_fn,
     )

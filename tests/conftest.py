@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 
 import pytest
+
+os.environ.setdefault("DRAINO_DISABLE_OP_LOCKS", "1")
 
 from draino.web import server as web_server
 

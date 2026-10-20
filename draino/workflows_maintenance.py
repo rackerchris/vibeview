@@ -60,6 +60,7 @@ def run_reboot(
     k8s_auth=None,
     phase_already_claimed: bool = False,
     operator: Optional[str] = None,
+    lock_lost_fn=None,
 ) -> None:
     ctx = WorkflowContext(
         state=state,
@@ -68,6 +69,14 @@ def run_reboot(
         audit_cb=audit_cb,
         abort_prefix="Reboot aborted",
     )
+
+    def lock_abort(key: str) -> bool:
+        if lock_lost_fn is None:
+            return False
+        if not lock_lost_fn():
+            return False
+        ctx.abort(key, "operation lock lost — another operator owns this action; aborting to avoid a double run")
+        return True
 
     if not phase_already_claimed:
         state.phase = NodePhase.REBOOTING
@@ -102,6 +111,9 @@ def run_reboot(
 
     ctx.step_set("issue_reboot", StepStatus.SUCCESS)
 
+    if lock_abort("issue_reboot"):
+        return
+
     ctx.step_set("await_offline", StepStatus.RUNNING)
     offline_deadline = time_module.time() + REBOOT_OFFLINE_TIMEOUT
     went_offline = False
@@ -123,6 +135,8 @@ def run_reboot(
 
         if went_offline:
             break
+        if lock_abort("await_offline"):
+            return
         time_module.sleep(5)
 
     if went_offline:
@@ -169,6 +183,8 @@ def run_reboot(
 
         if came_back:
             break
+        if lock_abort("await_online"):
+            return
 
         elapsed = int(time_module.time() - state.reboot_start)
         step = state.get_step("await_online")
@@ -210,6 +226,7 @@ def run_drain_quick(
     audit_cb: Optional[AuditCb] = None,
     k8s_auth=None,
     openstack_auth=None,
+    lock_lost_fn=None,
 ) -> None:
     del openstack_ops, openstack_auth
     if state.k8s_cordoned and state.k8s_drain_status == "drained":
@@ -270,6 +287,7 @@ def run_undrain(
     audit_cb: Optional[AuditCb] = None,
     k8s_auth=None,
     openstack_auth=None,
+    lock_lost_fn=None,
 ) -> None:
     del openstack_ops, openstack_auth
     if not state.k8s_cordoned and state.k8s_drain_status == "clear":

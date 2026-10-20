@@ -1,5 +1,42 @@
 # Multi-User Scaling Design Without a Database
 
+## Implementation Status (2026-10)
+
+**Implemented (Lease coordination, this repo):**
+
+- `draino/operations/k8s_ops.py`: Lease acquire (atomic 409-create), expired-lease
+  takeover with re-fetch race guard, owner-guarded renew/release, `_lock_namespace()`
+  from serviceaccount namespace / `DRAINO_POD_NAMESPACE`.
+- `draino/web/op_locks.py`: `OperationLockManager` with holder identity
+  (pod.user.session), background renewal (`DRAINO_LEASE_SECONDS=60`, renew at 1/3 TTL),
+  lock-loss tracking, and `guard()` context manager. `DRAINO_DISABLE_OP_LOCKS=1`
+  disables real Lease calls (tests only).
+- Maintenance entrypoints acquire per-node Leases before starting, with an
+  operator-visible "already running elsewhere" log + audit entry on contention:
+  `drain`, `undrain`, `evacuate`, `enable_nova`, `reboot` (naming
+  `vibeview-op-<action>-<node>`). Lock loss mid-workflow aborts the workflow
+  honestly (`lock_lost_fn` checked in reboot/evacuate poll loops; drain/undrain
+  are short enough that guard-release + abort-on-next-step suffices) — a
+  partitioned pod never keeps mutating infrastructure another replica owns.
+- Clone endpoint acquires a per-instance Lease (`vibeview-op-clone-<sha256-16>`)
+  with renewal during the workflow and release in `finally`; the in-process
+  clone-status map remains only as a convenience layer.
+- RBAC: namespaced Role grants `coordination.k8s.io/leases`
+  create/get/list/update/patch/delete.
+- Session close releases all Leases held by that session; pod death falls back
+  to lease expiry (≤60s), matching the failure model.
+
+**Not implemented (open decisions):**
+
+- Session strategy (Layer/§1): sessions remain in-process; multi-replica still
+  requires sticky sessions or a Redis session store (Phase 2 decision pending).
+  `replicaCount` must stay 1 until that decision.
+- Reads/caches remain replica-local by design (§7, intended).
+
+Phase 1 of the rollout plan (lease-aware actions on one replica) is done.
+
+## Original Design
+
 This document describes how to scale VibeView to multiple concurrent users and multiple
 web replicas without introducing a database as a system of record.
 

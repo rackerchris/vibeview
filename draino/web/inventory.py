@@ -17,6 +17,7 @@ from .inventory_refresh import (
     _HOST_SIGNALS_TTL,
     InventoryRefreshMixin,
 )
+from .op_locks import OperationLockManager
 from .serialise import serialise_state as _serialise
 
 _LOGGER = logging.getLogger("draino.web")
@@ -41,6 +42,7 @@ class DrainoServer(InventoryRefreshMixin, InventoryActionsMixin):
         self.operator_username = operator_username
         self.session_id = ""
         self._action_lock = threading.Lock()
+        self._op_locks = OperationLockManager(k8s_auth=k8s_auth)
 
         self.node_states: dict[str, NodeState] = {}
         self._last_k8s_nodes: list[dict] = []
@@ -91,10 +93,14 @@ class DrainoServer(InventoryRefreshMixin, InventoryActionsMixin):
                 dead.add(ws)
         self._clients -= dead
 
-    def _update_cb(self, node_name: str):
+    def _update_cb(self, node_name: str, lock_name: str = ""):
+        lock_lost_fn = (lambda: self._op_locks.lost(lock_name)) if lock_name else (lambda: False)
+
         def cb() -> None:
             state = self.node_states.get(node_name)
             if state:
+                if lock_lost_fn():
+                    state.phase = NodePhase.ERROR
                 self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
         return cb
 
@@ -114,6 +120,7 @@ class DrainoServer(InventoryRefreshMixin, InventoryActionsMixin):
     def close(self) -> None:
         """Tear down per-session resources (kubeconfig temp dirs with live credentials)."""
         self.log_audit("session", "-", "ended", "web ui session closed")
+        self._release_all_op_locks()
         if self.k8s_auth is not None:
             k8s_ops.dispose_auth_temp_dir(self.k8s_auth)
 

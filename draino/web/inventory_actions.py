@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import threading
 import time
-from functools import partial
 
 from openstack import exceptions as openstack_exceptions
 
@@ -12,11 +11,65 @@ from ..models import NodePhase
 from ..operations import k8s_ops, openstack_ops
 from ..reboot import is_ready_for_reboot, issue_reboot
 from .latency import measure_latency
+from .op_locks import OperationLockError, holder_identity, node_lock_name
 from .serialise import serialise_state as _serialise
 
 
 class InventoryActionsMixin:
     _action_lock: threading.Lock
+
+    def _holder(self) -> str:
+        return holder_identity(self.operator_username, self.session_id)
+
+    def _acquire_op_lock(self, name: str, action: str, target: str) -> bool:
+        """Cluster-wide Lease gate for shared-infrastructure mutations.
+
+        True to proceed; False with an operator-visible message when another
+        replica/session holds the lock or its state cannot be verified.
+        """
+        result = self._op_locks.try_acquire(name, self._holder(), action=action, target=target)
+        if result.acquired:
+            return True
+        if result.lease_error:
+            detail = f"cannot verify cluster-wide lock for {action} (Kubernetes API unreachable); refusing to start"
+            self.log_audit(action, target, "blocked", detail)
+            self._push({"type": "log", "node": target, "message": detail, "color": "warn"})
+            return False
+        held_by = result.held_by or "another operator"
+        detail = f"{action} already running elsewhere (held by {held_by})"
+        self.log_audit(action, target, "blocked", detail)
+        self._push({"type": "log", "node": target, "message": f"Operation already running elsewhere — lock held by {held_by}.", "color": "warn"})
+        return False
+
+    def _release_op_lock(self, name: str, action: str = "", target: str = "") -> None:
+        self._op_locks.release(name, self._holder(), action=action, target=target)
+
+    def _release_all_op_locks(self) -> None:
+        # Only locks this session still owns are released; a pod that died
+        # leaves its leases to expire after DRAINO_LEASE_SECONDS.
+        for name in list(self._op_locks.held_names(self._holder())):
+            self._op_locks.release(name, self._holder(), action="session_close", target="")
+
+    def _run_locked_workflow(self, lock_name: str, action: str, target: str, target_fn, args, kwargs=None) -> None:
+        """Run a worker function under the Lease guard; honest abort on lock loss."""
+        kwargs = dict(kwargs or {})
+        try:
+            with self._op_locks.guard(lock_name, self._holder(), action=action, target=target):
+                def _lock_lost() -> bool:
+                    return self._op_locks.lost(lock_name)
+
+                if kwargs.pop("use_lock_lost_kwarg", True):
+                    kwargs["lock_lost_fn"] = _lock_lost
+                target_fn(*args, **kwargs)
+                if _lock_lost():
+                    self._push({
+                        "type": "log",
+                        "node": target,
+                        "message": f"{action} stopped: operation lock lost — another operator now owns this action.",
+                        "color": "warn",
+                    })
+        except OperationLockError:
+            pass
 
     def _claim_phase(self, node_name: str, allowed: tuple[NodePhase, ...], new_phase: NodePhase):
         """Atomically transition a node's phase, returning the state only if claimed."""
@@ -94,6 +147,9 @@ class InventoryActionsMixin:
         if state is None:
             self._push({"type": "log", "node": node_name, "message": "Evacuation already in progress.", "color": "warn"})
             return
+        if not self._acquire_op_lock(node_lock_name("evacuate", node_name), "evacuation", node_name):
+            return
+
         state.instances = []
         state.log_buffer = []
         state.preflight_instances = []
@@ -108,10 +164,24 @@ class InventoryActionsMixin:
         self._push({"type": "log", "node": node_name, "message": f"Starting Nova evacuation of {node_name}…", "color": "important"})
 
         threading.Thread(
-            target=worker.run_workflow,
-            args=(state, self._update_cb(node_name), self._log_cb(node_name), audit_cb, self.k8s_auth, self.openstack_auth),
+            target=self._run_locked_evacuation,
+            args=(node_name, state, audit_cb),
             daemon=True,
         ).start()
+
+    def _run_locked_evacuation(self, node_name: str, state, audit_cb) -> None:
+        lock_name = node_lock_name("evacuate", node_name)
+        # The evacuate workflow calls openstack_ops directly (no lock_lost hook);
+        # the guarded runner still enforces release + lock-loss logging, and the
+        # in-progress Nova posture is re-derived from real state on refresh.
+        self._run_locked_workflow(
+            lock_name,
+            "evacuation",
+            node_name,
+            worker.run_workflow,
+            (state, self._update_cb(node_name, lock_name), self._log_cb(node_name), audit_cb, self.k8s_auth, self.openstack_auth),
+            kwargs={"use_lock_lost_kwarg": False},
+        )
 
     def action_enable_nova(self, node_name: str) -> None:
         state = self.node_states.get(node_name)
@@ -127,15 +197,23 @@ class InventoryActionsMixin:
             self._push({"type": "log", "node": node_name, "message": "Nova compute service is already enabled.", "color": "dim"})
             return
 
+        if not self._acquire_op_lock(node_lock_name("enablenova", node_name), "enable_nova", node_name):
+            return
+        state.phase = NodePhase.RUNNING
+
         audit_cb = self._audit_cb("enable_nova", node_name)
         audit_cb("started")
         self._push({"type": "log", "node": node_name, "message": f"Re-enabling Nova compute service on {node_name}…", "color": "important"})
 
         threading.Thread(
-            target=self._enable_nova_bg,
+            target=self._enable_nova_locked,
             args=(node_name, audit_cb),
             daemon=True,
         ).start()
+
+    def _enable_nova_locked(self, node_name: str, audit_cb) -> None:
+        with self._op_locks.guard(node_lock_name("enablenova", node_name), self._holder(), action="enable_nova", target=node_name):
+            self._enable_nova_bg(node_name, audit_cb)
 
     def _enable_nova_bg(self, node_name: str, audit_cb) -> None:
         state = self.node_states.get(node_name)
@@ -172,6 +250,9 @@ class InventoryActionsMixin:
         state = self._claim_phase(node_name, (NodePhase.IDLE, NodePhase.COMPLETE, NodePhase.ERROR), NodePhase.RUNNING)
         if state is None:
             return
+        if not self._acquire_op_lock(node_lock_name("drain", node_name), "drain", node_name):
+            state.phase = NodePhase.IDLE
+            return
         state.k8s_drain_status = "in_progress"
         state.k8s_drain_detail = "starting kubernetes drain"
         state.init_quick_drain_steps(state.is_compute)
@@ -181,9 +262,11 @@ class InventoryActionsMixin:
         self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
         self._push({"type": "log", "node": node_name, "message": f"Starting Kubernetes drain of {node_name}…", "color": "important"})
 
+        lock_name = node_lock_name("drain", node_name)
         threading.Thread(
-            target=worker.run_drain_quick,
-            args=(state, self._update_cb(node_name), self._log_cb(node_name), audit_cb, self.k8s_auth, self.openstack_auth),
+            target=self._run_locked_workflow,
+            args=(lock_name, "drain", node_name, worker.run_drain_quick,
+                  (state, self._update_cb(node_name, lock_name), self._log_cb(node_name), audit_cb, self.k8s_auth, self.openstack_auth)),
             daemon=True,
         ).start()
 
@@ -198,6 +281,9 @@ class InventoryActionsMixin:
         state = self._claim_phase(node_name, (NodePhase.IDLE, NodePhase.COMPLETE, NodePhase.ERROR), NodePhase.UNDRAINING)
         if state is None:
             return
+        if not self._acquire_op_lock(node_lock_name("undrain", node_name), "undrain", node_name):
+            state.phase = NodePhase.IDLE
+            return
         state.k8s_drain_detail = "clearing kubernetes drain posture"
         state.init_undrain_steps(state.is_compute)
 
@@ -206,9 +292,11 @@ class InventoryActionsMixin:
         self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
         self._push({"type": "log", "node": node_name, "message": f"Clearing Kubernetes drain on {node_name}…", "color": "important"})
 
+        lock_name = node_lock_name("undrain", node_name)
         threading.Thread(
-            target=worker.run_undrain,
-            args=(state, self._update_cb(node_name), self._log_cb(node_name), audit_cb, self.k8s_auth, self.openstack_auth),
+            target=self._run_locked_workflow,
+            args=(lock_name, "undrain", node_name, worker.run_undrain,
+                  (state, self._update_cb(node_name, lock_name), self._log_cb(node_name), audit_cb, self.k8s_auth, self.openstack_auth)),
             daemon=True,
         ).start()
 
@@ -296,6 +384,12 @@ class InventoryActionsMixin:
                 self._push({"type": "log", "node": node_name, "message": detail, "color": "warn"})
                 return
             state.phase = NodePhase.REBOOTING
+        if not self._acquire_op_lock(node_lock_name("reboot", node_name), "reboot", node_name):
+            with self._action_lock:
+                fresh = self.node_states.get(node_name)
+                if fresh is not None and fresh.phase == NodePhase.REBOOTING:
+                    fresh.phase = NodePhase.IDLE
+            return
         # Steps are initialised before the thread starts so no poller can
         # observe a REBOOTING node without its step list.
         state.reboot_start = time.time()
@@ -308,17 +402,19 @@ class InventoryActionsMixin:
         audit_cb("started", f"hypervisor={state.hypervisor}")
         self._push({"type": "log", "node": node_name, "message": f"Rebooting {node_name}…", "color": "important"})
 
+        lock_name = node_lock_name("reboot", node_name)
         threading.Thread(
-            target=partial(
-                worker.run_reboot,
-                issue_reboot_fn=issue_reboot,
-                phase_already_claimed=True,
-            ),
-            args=(state, self._update_cb(node_name), self._log_cb(node_name, "magenta")),
+            target=self._run_locked_workflow,
+            args=(lock_name, "reboot", node_name, worker.run_reboot,
+                  (state, self._update_cb(node_name, lock_name), self._log_cb(node_name, "magenta"))),
             kwargs={
-                "audit_cb": audit_cb,
-                "k8s_auth": self.k8s_auth,
-                "operator": self.operator_username or None,
+                "kwargs": {
+                    "audit_cb": audit_cb,
+                    "k8s_auth": self.k8s_auth,
+                    "operator": self.operator_username or None,
+                    "issue_reboot_fn": issue_reboot,
+                    "phase_already_claimed": True,
+                },
             },
             daemon=True,
         ).start()

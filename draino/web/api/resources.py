@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ...operations import k8s_ops, openstack_ops
 from ..assistant_service import answer_assistant_query, assistant_provider_status, stream_assistant_query, validate_assistant_provider
 from .api_issues import build_api_issue
+from ..op_locks import RENEW_INTERVAL_SECONDS, clone_lock_name, holder_identity, leases_disabled
 from ..resource_helpers import (
     CloneWorkflowError,
     clone_instance,
@@ -53,6 +54,7 @@ _RESOURCE_DETAIL_TIMEOUT_SECONDS = float(os.getenv("DRAINO_RESOURCE_DETAIL_TIMEO
 _ASSISTANT_QUERY_TIMEOUT_SECONDS = float(os.getenv("DRAINO_ASSISTANT_QUERY_TIMEOUT_SECONDS", "20"))
 _clone_status_lock = threading.Lock()
 _clone_status_by_instance: dict[str, dict] = {}
+_EVENT_FACTORY = threading.Event
 
 _get_session_record_getter: Callable[[], Callable[[Request], object]] | None = None
 
@@ -617,6 +619,32 @@ async def api_instance_clone(instance_id: str, request: Request):
             "error": "A clone is already running for this source instance.",
             "api_issue": None,
         }
+    # Cluster-wide exclusivity: one in-flight clone per source instance across
+    # all replicas/sessions (the in-process status above is a convenience layer).
+    lock_name = clone_lock_name(instance_id)
+    lock_holder = holder_identity(session.server.operator_username, session.server.session_id)
+    auth = session.server.k8s_auth
+    if leases_disabled():
+        acquired, existing_lease = True, None
+    else:
+        acquired, existing_lease = k8s_ops.acquire_operation_lease(lock_name, lock_holder, auth=auth)
+    if not acquired:
+        expired = k8s_ops.operation_lease_expired(lock_name, auth=auth)
+        if expired is None:
+            return {
+                "result": None,
+                "error": "Cannot verify the cluster-wide clone lock (Kubernetes API unreachable); refusing to start.",
+                "api_issue": None,
+            }
+        if expired and k8s_ops.take_over_expired_operation_lease(lock_name, lock_holder, auth=auth):
+            acquired = True
+    if not acquired:
+        held_by = (existing_lease or {}).get("holder") or "another operator"
+        return {
+            "result": None,
+            "error": f"A clone is already running for this source instance (held by {held_by}).",
+            "api_issue": None,
+        }
     _set_clone_status(instance_id, {
         "state": "running",
         "source_instance_id": instance_id,
@@ -650,6 +678,30 @@ async def api_instance_clone(instance_id: str, request: Request):
             error=None,
             extra=extra,
         )
+
+    def _release_clone_lease() -> None:
+        stop_renewal.set()
+        if leases_disabled():
+            return
+        try:
+            k8s_ops.release_operation_lease(lock_name, lock_holder, auth=auth)
+        except Exception as exc:
+            _LOGGER.warning("clone lease release failed name=%s error=%s", lock_name, exc)
+
+    stop_renewal = _EVENT_FACTORY()
+
+    def _renew_clone_lease() -> None:
+        while not stop_renewal.wait(RENEW_INTERVAL_SECONDS):
+            if leases_disabled():
+                return
+            try:
+                ok = k8s_ops.renew_operation_lease(lock_name, lock_holder, auth=auth)
+            except Exception as exc:
+                _LOGGER.warning("clone lease renew errored name=%s error=%s", lock_name, exc)
+                continue
+            if not ok:
+                _LOGGER.error("clone lease lost name=%s holder=%s", lock_name, lock_holder)
+                return
 
     def _run_clone() -> None:
         try:
@@ -702,8 +754,11 @@ async def api_instance_clone(instance_id: str, request: Request):
                 extra=failure_extra,
             )
             _LOGGER.exception("clone api failed instance_id=%s", instance_id)
+        finally:
+            _release_clone_lease()
 
     threading.Thread(target=_run_clone, daemon=True).start()
+    threading.Thread(target=_renew_clone_lease, daemon=True).start()
     return {
         "result": {
             "accepted": True,

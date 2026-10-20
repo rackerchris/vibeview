@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import yaml
@@ -649,3 +650,129 @@ def get_drain_preflight(
         "warning": warning,
         "error": None,
     }
+
+
+# ── Distributed operation locks (Lease-based coordination) ───────────────────
+
+_LEASE_NAMESPACE_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+
+def _lock_namespace() -> str:
+    ns = os.getenv("DRAINO_POD_NAMESPACE", "").strip()
+    if ns:
+        return ns
+    try:
+        with open(_LEASE_NAMESPACE_FILE, encoding="utf-8") as fh:
+            return fh.read().strip() or "default"
+    except OSError:
+        return "default"
+
+
+def acquire_operation_lease(
+    name: str,
+    holder: str,
+    lease_seconds: int = 60,
+    auth: K8sAuth | None = None,
+) -> tuple[bool, dict | None]:
+    """Try to atomically create a coordination Lease owned by ``holder``.
+
+    Returns ``(True, None)`` on success, ``(False, holder_payload)`` when the
+    lease already exists (payload parsed best-effort), ``(False, None)`` when
+    the API is unreachable (caller should treat as unavailable, not held).
+    """
+    api = client.CoordinationV1Api(_api_client(auth))
+    body = client.V1Lease(
+        metadata=client.V1ObjectMeta(
+            name=name,
+            namespace=_lock_namespace(),
+            labels={"app.kubernetes.io/managed-by": "draino"},
+        ),
+        spec=client.V1LeaseSpec(
+            holder_identity=holder,
+            lease_duration_seconds=lease_seconds,
+            acquire_time=datetime.now(timezone.utc),
+            renew_time=datetime.now(timezone.utc),
+        ),
+    )
+    try:
+        api.create_namespaced_lease(namespace=_lock_namespace(), body=body)
+        return True, None
+    except ApiException as exc:
+        if exc.status == 409:
+            try:
+                current = api.read_namespaced_lease(name=name, namespace=_lock_namespace())
+                payload = {
+                    "holder": current.spec.holder_identity if current.spec else None,
+                    "renew_time": current.spec.renew_time.isoformat() if current.spec and current.spec.renew_time else None,
+                    "lease_seconds": current.spec.lease_duration_seconds if current.spec else None,
+                }
+            except ApiException:
+                payload = None
+            return False, payload
+        return False, None
+
+
+def operation_lease_expired(name: str, auth: K8sAuth | None = None) -> Optional[bool]:
+    """True if the lease is past renew_time + duration, None if unreadable."""
+    api = client.CoordinationV1Api(_api_client(auth))
+    try:
+        current = api.read_namespaced_lease(name=name, namespace=_lock_namespace())
+    except ApiException as exc:
+        return True if exc.status == 404 else None
+    spec = current.spec
+    if spec is None or spec.renew_time is None or spec.lease_duration_seconds is None:
+        return True
+    age = (datetime.now(timezone.utc) - spec.renew_time).total_seconds()
+    return age > spec.lease_duration_seconds
+
+
+def take_over_expired_operation_lease(name: str, holder: str, lease_seconds: int = 60, auth: K8sAuth | None = None) -> bool:
+    """Force-update an expired lease to ``holder`` (re-fetch guards the race)."""
+    api = client.CoordinationV1Api(_api_client(auth))
+    try:
+        current = api.read_namespaced_lease(name=name, namespace=_lock_namespace())
+    except ApiException:
+        return False
+    spec = current.spec
+    if spec and spec.renew_time and spec.lease_duration_seconds:
+        age = (datetime.now(timezone.utc) - spec.renew_time).total_seconds()
+        if age <= spec.lease_duration_seconds:
+            return False
+    if current.spec is None:
+        current.spec = client.V1LeaseSpec()
+    current.spec.holder_identity = holder
+    current.spec.lease_duration_seconds = lease_seconds
+    current.spec.renew_time = datetime.now(timezone.utc)
+    try:
+        api.replace_namespaced_lease(name=name, namespace=_lock_namespace(), body=current)
+        check = api.read_namespaced_lease(name=name, namespace=_lock_namespace())
+        return bool(check.spec and check.spec.holder_identity == holder)
+    except ApiException:
+        return False
+
+
+def renew_operation_lease(name: str, holder: str, lease_seconds: int = 60, auth: K8sAuth | None = None) -> bool:
+    """Renew the lease; False when the lease was lost (holder changed or gone)."""
+    api = client.CoordinationV1Api(_api_client(auth))
+    try:
+        current = api.read_namespaced_lease(name=name, namespace=_lock_namespace())
+        if current.spec is None or current.spec.holder_identity != holder:
+            return False
+        current.spec.renew_time = datetime.now(timezone.utc)
+        current.spec.lease_duration_seconds = lease_seconds
+        api.replace_namespaced_lease(name=name, namespace=_lock_namespace(), body=current)
+        return True
+    except ApiException:
+        return False
+
+
+def release_operation_lease(name: str, holder: str, auth: K8sAuth | None = None) -> None:
+    api = client.CoordinationV1Api(_api_client(auth))
+    try:
+        current = api.read_namespaced_lease(name=name, namespace=_lock_namespace())
+        if current.spec is None or current.spec.holder_identity != holder:
+            return
+        api.delete_namespaced_lease(name=name, namespace=_lock_namespace())
+    except ApiException as exc:
+        if exc.status != 404:
+            raise
