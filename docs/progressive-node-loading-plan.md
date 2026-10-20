@@ -1,5 +1,27 @@
 # Progressive Node Loading Plan
 
+## Implementation Status
+
+Implemented as specced, in this order:
+
+1. `NodeState.inventory_complete` (`draino/models.py`, serialised in
+   `draino/web/serialise.py`) — explicit per-node completion marker.
+2. `_load_nodes_bg` pushes the membership skeleton as `full_state` on **every**
+   refresh with `inventory_complete=false`, before any enrichment.
+3. Enrichment runs on a bounded `ThreadPoolExecutor`
+   (`DRAINO_ENRICHMENT_WORKERS`, default 6); each node's completion pushes its
+   own `state_update` with `inventory_complete=true`. A per-node enrichment
+   failure leaves that node incomplete without aborting the refresh.
+4. Sidebar loading affordance: dimmed row + pulsing `loading` badge + "loading…"
+   hint while `inventory_complete === false` (`app_nav.js`, `app.css`); selected
+   node header shows an "⟳ Inventory Loading" badge (`app_infra.js`).
+
+Deviations: the final consolidation push keeps the existing
+`_push_inventory_state` behaviour; partial-data stabilisation relies on the
+existing `normaliseIncomingNode` merge rather than new logic.
+
+## Original Plan
+
 This note outlines how to make the node list feel more incremental and progressively hydrated, while keeping the current websocket/state model intact.
 
 ## Current Behavior

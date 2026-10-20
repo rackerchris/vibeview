@@ -250,6 +250,7 @@ function renderObjHeader(nd) {
   if (nd.is_etcd) badges.push(`<span class="tree-badge etcd">etcd</span>`);
   if (nd.hosts_mariadb) badges.push(`<span class="tree-badge mariadb">mariadb</span>`);
   if (nd.is_edge) badges.push(`<span class="tree-badge edge">edge</span>`);
+  if (nd.inventory_complete === false) badges.push(`<span class="badge gray" title="OpenStack, role and host details for this node are still loading">⟳ Inventory Loading</span>`);
   if (detailsRefreshing) badges.push(`<span class="badge blue">⟳ Details Refreshing</span>`);
   document.getElementById('oh-badges').innerHTML = badges.join('');
 }

@@ -291,8 +291,16 @@ def test_load_nodes_bg_uses_state_updates_when_membership_is_unchanged(monkeypat
 
     server._load_nodes_bg(cached_nodes=nodes, silent=True)
 
-    assert [msg["type"] for msg in pushed] == ["state_update", "state_update"]
-    assert all(msg["node"] == "node-1" for msg in pushed)
+    # Progressive contract: membership skeleton (full_state, inventory_complete
+    # false), then one state_update per node as enrichment completes, then a
+    # final consolidation push.
+    types = [msg["type"] for msg in pushed]
+    assert types[0] == "full_state"
+    assert pushed[0]["nodes"]["node-1"]["inventory_complete"] is False
+    updates = [msg for msg in pushed if msg["type"] == "state_update"]
+    assert updates and all(msg["node"] == "node-1" for msg in updates)
+    assert updates[-1]["data"]["inventory_complete"] is True
+    assert types[-1] == "state_update"
     assert server.node_states["node-1"].is_edge is True
     assert server.node_states["node-1"].hosts_mariadb is True
 
@@ -319,7 +327,13 @@ def test_load_nodes_bg_uses_full_state_when_membership_changes(monkeypatch, tmp_
 
     server._load_nodes_bg(cached_nodes=nodes, silent=True)
 
-    assert [msg["type"] for msg in pushed] == ["full_state", "full_state"]
+    types = [msg["type"] for msg in pushed]
+    # Membership change: skeleton full_state first (node-old gone, node-1 not
+    # yet complete), then per-node completion updates.
+    assert types[0] == "full_state"
+    assert "node-old" not in pushed[0]["nodes"]
+    assert pushed[0]["nodes"]["node-1"]["inventory_complete"] is False
+    assert any(msg["type"] == "state_update" and msg["data"]["inventory_complete"] is True for msg in pushed)
     assert "node-old" not in server.node_states
     assert "node-1" in server.node_states
 
@@ -499,3 +513,93 @@ def test_etcd_reboot_fails_closed_on_unknown_membership(monkeypatch, tmp_path):
 
     blocked = [m for m in pushed if m["type"] == "reboot_blocked"]
     assert blocked and "could not be determined" in blocked[0]["detail"]
+
+
+def test_load_nodes_bg_marks_membership_incomplete_then_completes_each_node(monkeypatch, tmp_path):
+    server = web_server.DrainoServer(audit_log=str(tmp_path / "audit.log"))
+    nodes = [
+        {"name": "node-a", "hostname": "hv-a", "ready": True, "cordoned": False},
+        {"name": "node-b", "hostname": "hv-b", "ready": True, "cordoned": False},
+    ]
+
+    pushed: list[dict] = []
+    monkeypatch.setattr(web_server.node_agent_client, "get_ready_node_names", lambda: set())
+    monkeypatch.setattr(web_server.k8s_ops, "get_etcd_node_names", lambda auth=None: set())
+    monkeypatch.setattr(web_server.k8s_ops, "get_node_host_signals", lambda node_name, hostname=None: {})
+    monkeypatch.setattr(web_server.k8s_ops, "get_ovn_edge_nodes", lambda auth=None: set())
+    monkeypatch.setattr(web_server.openstack_ops, "get_all_host_summaries", lambda log_cb=None, auth=None: {})
+    monkeypatch.setattr(server, "_push", pushed.append)
+
+    server._load_nodes_bg(cached_nodes=nodes, silent=True)
+
+    skeleton = pushed[0]
+    assert skeleton["type"] == "full_state"
+    assert all(entry["inventory_complete"] is False for entry in skeleton["nodes"].values())
+
+    completed = {m["node"] for m in pushed if m["type"] == "state_update" and m["data"]["inventory_complete"] is True}
+    assert completed == {"node-a", "node-b"}
+    assert server.node_states["node-a"].inventory_complete is True
+    assert server.node_states["node-b"].inventory_complete is True
+
+
+def test_load_nodes_bg_enrichment_failure_leaves_node_incomplete(monkeypatch, tmp_path):
+    server = web_server.DrainoServer(audit_log=str(tmp_path / "audit.log"))
+    nodes = [
+        {"name": "node-a", "hostname": "hv-a", "ready": True, "cordoned": False},
+        {"name": "node-b", "hostname": "hv-b", "ready": True, "cordoned": False},
+    ]
+
+    def _signals(node_name, hostname=None):
+        if node_name == "node-b":
+            raise RuntimeError("agent unreachable")
+        return {}
+
+    pushed: list[dict] = []
+    monkeypatch.setattr(web_server.node_agent_client, "get_ready_node_names", lambda: set())
+    monkeypatch.setattr(web_server.k8s_ops, "get_etcd_node_names", lambda auth=None: set())
+    monkeypatch.setattr(web_server.k8s_ops, "get_node_host_signals", _signals)
+    monkeypatch.setattr(web_server.k8s_ops, "get_ovn_edge_nodes", lambda auth=None: set())
+    monkeypatch.setattr(web_server.openstack_ops, "get_all_host_summaries", lambda log_cb=None, auth=None: {})
+    monkeypatch.setattr(server, "_push", pushed.append)
+
+    server._load_nodes_bg(cached_nodes=nodes, silent=True)
+
+    assert server.node_states["node-a"].inventory_complete is True
+    assert server.node_states["node-b"].inventory_complete is False
+    completed = {m["node"] for m in pushed if m["type"] == "state_update" and m["data"]["inventory_complete"] is True}
+    assert completed == {"node-a"}
+
+
+def test_load_nodes_bg_enriches_nodes_in_parallel(monkeypatch, tmp_path):
+    import threading
+    import time as _time
+
+    server = web_server.DrainoServer(audit_log=str(tmp_path / "audit.log"))
+    nodes = [
+        {"name": f"node-{i}", "hostname": f"hv-{i}", "ready": True, "cordoned": False}
+        for i in range(4)
+    ]
+
+    in_flight = {"current": 0, "max": 0}
+    barrier_lock = threading.Lock()
+
+    def _signals(node_name, hostname=None):
+        with barrier_lock:
+            in_flight["current"] += 1
+            in_flight["max"] = max(in_flight["max"], in_flight["current"])
+        _time.sleep(0.05)
+        with barrier_lock:
+            in_flight["current"] -= 1
+        return {}
+
+    monkeypatch.setattr(web_server.node_agent_client, "get_ready_node_names", lambda: set())
+    monkeypatch.setattr(web_server.k8s_ops, "get_etcd_node_names", lambda auth=None: set())
+    monkeypatch.setattr(web_server.k8s_ops, "get_node_host_signals", _signals)
+    monkeypatch.setattr(web_server.k8s_ops, "get_ovn_edge_nodes", lambda auth=None: set())
+    monkeypatch.setattr(web_server.openstack_ops, "get_all_host_summaries", lambda log_cb=None, auth=None: {})
+    monkeypatch.setattr(server, "_push", lambda message: None)
+
+    server._load_nodes_bg(cached_nodes=nodes, silent=True)
+
+    assert in_flight["max"] > 1
+    assert all(state.inventory_complete for state in server.node_states.values())

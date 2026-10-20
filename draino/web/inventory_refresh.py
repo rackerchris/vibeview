@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from .. import node_agent_client
 from ..models import NodePhase, NodeState
@@ -19,6 +20,8 @@ _NODE_METRICS_TTL = float(os.getenv("DRAINO_NODE_METRICS_TTL", "30"))
 _OVN_EDGE_TTL = float(os.getenv("DRAINO_OVN_EDGE_TTL", "60"))
 _MARIADB_NODE_TTL = float(os.getenv("DRAINO_MARIADB_NODE_TTL", "60"))
 _DEFAULT_GET_MARIADB_NODE_NAMES = k8s_ops.get_mariadb_node_names
+_ENRICHMENT_WORKERS = int(os.getenv("DRAINO_ENRICHMENT_WORKERS", "6"))
+_PUSH_LOCK = threading.Lock()
 
 
 def _host_aliases(value: str | None) -> list[str]:
@@ -78,11 +81,12 @@ class InventoryRefreshMixin:
         return previous_names != current_names
 
     def _push_inventory_state(self, force_full_state: bool = False) -> None:
-        if force_full_state:
-            self._push({"type": "full_state", "nodes": {name: _serialise(state) for name, state in self.node_states.items()}})
-            return
-        for node_name, state in self.node_states.items():
-            self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
+        with _PUSH_LOCK:
+            if force_full_state:
+                self._push({"type": "full_state", "nodes": {name: _serialise(state) for name, state in self.node_states.items()}})
+                return
+            for node_name, state in self.node_states.items():
+                self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
 
     def _get_cached_openstack_summaries(self, now: float, force: bool = False) -> dict[str, dict] | None:
         if force or self._openstack_summary_cache is None:
@@ -132,7 +136,14 @@ class InventoryRefreshMixin:
                     return
 
             membership_changed = self._apply_k8s_nodes(nodes)
-            self._push_inventory_state(force_full_state=membership_changed)
+            # Until phase 2 lands per-node completions, no node is complete —
+            # reset before the skeleton push so the UI sees it immediately.
+            for node in nodes:
+                state = self.node_states.get(node["name"])
+                if state is not None:
+                    state.inventory_complete = False
+            # Phase 1: names + base K8s posture, immediately, on every refresh.
+            self._push_inventory_state(force_full_state=True)
 
             try:
                 ready_node_agents = node_agent_client.get_ready_node_names()
@@ -183,6 +194,7 @@ class InventoryRefreshMixin:
                         summaries = openstack_ops.get_all_host_summaries(log_cb=_os_log, auth=self.openstack_auth)
                     except Exception as exc:
                         self._push({"type": "log", "node": "-", "message": f"OpenStack summary failed: {exc}", "color": "warn"})
+                        self._finish_refresh_uncomplete(nodes, membership_changed, silent)
                         return
                     self._set_cached_openstack_summaries(summaries, now=now)
             elif not silent:
@@ -190,13 +202,15 @@ class InventoryRefreshMixin:
 
             self._etcd_node_names = k8s_ops.get_etcd_node_names(auth=self.k8s_auth)
 
-            for node in nodes:
+            # Phase 2: bounded parallel per-node enrichment; each completion
+            # pushes its own state_update so nodes visibly hydrate one by one.
+            def _enrich(node: dict) -> None:
                 name = node["name"]
                 hostname = node.get("hostname", name)
                 summary = _lookup_host_summary(summaries, hostname, name)
                 state = self.node_states.get(name)
                 if not state:
-                    continue
+                    return
                 candidates = {
                     state.k8s_name.lower(),
                     state.k8s_name.split(".", 1)[0].lower(),
@@ -220,10 +234,35 @@ class InventoryRefreshMixin:
                     state.latest_kernel_version = signals.get("latest_kernel_version")
                     state.reboot_required = bool(signals.get("reboot_required", False))
                     self._host_signal_refresh_at[name] = now
+                state.inventory_complete = True
+                with _PUSH_LOCK:
+                    self._push({"type": "state_update", "node": name, "data": _serialise(state)})
 
-            self._push_inventory_state(force_full_state=membership_changed)
-            if not silent:
-                self._push({"type": "log", "node": "-", "message": f"Node list refreshed — {len(nodes)} nodes loaded.", "color": "success"})
+            with ThreadPoolExecutor(max_workers=_ENRICHMENT_WORKERS, thread_name_prefix="enrich") as pool:
+                list(pool.map(lambda node: self._safe_enrich(_enrich, node), nodes))
+
+            self._finish_refresh_complete(nodes, membership_changed, silent)
+
+    @staticmethod
+    def _safe_enrich(enrich, node: dict) -> None:
+        try:
+            enrich(node)
+        except Exception:
+            # A single node's enrichment failure must not abort the refresh;
+            # the node simply stays inventory_complete=false until next pass.
+            pass
+
+    def _finish_refresh_uncomplete(self, nodes: list[dict], membership_changed: bool, silent: bool) -> None:
+        for node in nodes:
+            state = self.node_states.get(node["name"])
+            if state is not None:
+                state.inventory_complete = False
+        self._push_inventory_state(force_full_state=membership_changed)
+
+    def _finish_refresh_complete(self, nodes: list[dict], membership_changed: bool, silent: bool) -> None:
+        self._push_inventory_state(force_full_state=False)
+        if not silent:
+            self._push({"type": "log", "node": "-", "message": f"Node list refreshed — {len(nodes)} nodes loaded.", "color": "success"})
 
     def _should_refresh_host_signals(self, node_name: str, now: float, force: bool = False) -> bool:
         if force:

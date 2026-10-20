@@ -86,6 +86,11 @@ class NodeState:
     preflight_instances: list[dict] = field(default_factory=list)
     preflight_loading:   bool = False
 
+    # ── Progressive inventory hydration ──────────────────────────────────────
+    # False once membership is known but before OpenStack/role/host-signal
+    # enrichment lands for this node; True when the node's data is complete.
+    inventory_complete: bool = False
+
     # ── Reboot tracking ───────────────────────────────────────────────────
     reboot_start:    Optional[float] = None   # Unix timestamp when reboot issued
     reboot_downtime: Optional[float] = None   # Seconds of downtime (set on recovery)

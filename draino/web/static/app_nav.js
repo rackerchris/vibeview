@@ -541,13 +541,16 @@ function treeItemHtml(name, nd) {
     if (extra > 0) aggHtml += `<span class="tree-badge agg">+${extra}</span>`;
   }
 
-  return `<div class="tree-item${sel}${mismatch}${maintenanceClass}" onclick="selectNode('${escAttr(name)}')" data-node="${escAttr(name)}">
+  const loading = nd.inventory_complete === false;
+  const loadingBdg = loading ? `<span class="tree-badge loading" title="Node details are still loading">loading</span>` : '';
+
+  return `<div class="tree-item${sel}${mismatch}${maintenanceClass}${loading ? ' tree-loading' : ''}" onclick="selectNode('${escAttr(name)}')" data-node="${escAttr(name)}">
     <span class="ti-ico">${ico}</span>
     <span class="tree-dot ${dot}"></span>
     <span class="ti-name">${esc(name)}</span>
     <span class="tree-meta">
-      <span class="hint">${hintTxt}</span>
-      ${etcBdg}${mariadbBdg}${agentBdg}${edgeBdg}${netBdg}${readyBdg}${k8sDrainBdg}${evacuatedBdg}${cordonedBdg}${novaDisabledBdg}${noSchedBdg}${vmBadge}${amphoraBadge}${rebootBdg}${kernelBdg}${computeMismatchBdg}${aggHtml}
+      <span class="hint">${loading ? 'loading…' : hintTxt}</span>
+      ${etcBdg}${mariadbBdg}${agentBdg}${edgeBdg}${netBdg}${readyBdg}${k8sDrainBdg}${evacuatedBdg}${cordonedBdg}${novaDisabledBdg}${noSchedBdg}${vmBadge}${amphoraBadge}${rebootBdg}${kernelBdg}${computeMismatchBdg}${aggHtml}${loadingBdg}
     </span>
   </div>`;
 }

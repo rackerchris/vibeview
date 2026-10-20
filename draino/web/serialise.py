@@ -39,6 +39,7 @@ def serialise_state(state: NodeState) -> dict:
         "aggregates": state.aggregates,
         "preflight_loading": state.preflight_loading,
         "preflight_instances": state.preflight_instances,
+        "inventory_complete": state.inventory_complete,
         "reboot_start": state.reboot_start,
         "reboot_downtime": state.reboot_downtime,
         "steps": [
