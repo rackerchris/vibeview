@@ -61,6 +61,10 @@ Node agent resource names.
 {{- printf "%s-trustmebro-agent" (include "draino.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "draino.nodeAgentSecretName" -}}
-{{- printf "%s-node-agent-auth" (include "draino.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- define "draino.nodeAgentTlsSecretName" -}}
+{{- printf "%s-node-agent-tls" (include "draino.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "draino.nodeAgentTokenSecretName" -}}
+{{- printf "%s-node-agent-token" (include "draino.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

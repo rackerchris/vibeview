@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 from draino.models import NodePhase, NodeState
 from draino.web import inventory_actions
 from draino.web import server as web_server
@@ -381,3 +384,118 @@ def test_load_nodes_bg_manual_refresh_bypasses_cached_openstack_summaries(monkey
     server._load_nodes_bg(cached_nodes=nodes, silent=False)
 
     assert summary_calls == ["called", "called"]
+
+
+def _drained_compute_state(name="node-1"):
+    state = NodeState(k8s_name=name, hypervisor="hv-1", is_compute=True, k8s_cordoned=True, compute_status="disabled", vm_count=0, amphora_count=0)
+    state.k8s_drain_status = "drained"
+    state.nova_evacuation_status = "evacuated"
+    return state
+
+
+def test_reboot_confirm_audits_operator_identity(monkeypatch, tmp_path):
+    audit_path = tmp_path / "audit.log"
+    server = web_server.DrainoServer(
+        role_names=["admin"],
+        audit_log=str(audit_path),
+        operator_username="alice",
+    )
+    server.session_id = "sess-abc"
+    server.node_states["node-1"] = _drained_compute_state()
+
+    class _NoStartThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            raise AssertionError("thread must not be started")
+
+    monkeypatch.setattr(inventory_actions.threading, "Thread", _NoStartThread)
+    try:
+        server.action_reboot_confirm("node-1")
+    except AssertionError:
+        pass  # the worker thread's start() was reached, as expected
+
+    import json
+    entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    started = [e for e in entries if e["action"] == "reboot" and e["event"] == "started"]
+    assert started and started[0]["user"] == "alice"
+    assert started[0]["session_id"] == "sess-abc"
+
+
+def test_reboot_confirm_claims_phase_synchronously(monkeypatch, tmp_path):
+    server = web_server.DrainoServer(role_names=["admin"], audit_log=str(tmp_path / "audit.log"))
+    state = _drained_compute_state()
+    server.node_states["node-1"] = state
+
+    started: list[bool] = []
+    monkeypatch.setattr(inventory_actions.worker, "run_reboot", lambda *a, **k: started.append(True))
+    monkeypatch.setattr(inventory_actions.threading, "Thread", lambda target=None, args=(), kwargs=None, daemon=None: SimpleNamespace(
+        start=lambda: None,
+    ))
+
+    server.action_reboot_confirm("node-1")
+    assert state.phase == NodePhase.REBOOTING
+    assert state.reboot_downtime is None
+    assert state.get_step("issue_reboot") is not None
+
+    pushed: list[dict] = []
+    server._push = pushed.append
+    server.action_reboot_confirm("node-1")
+    assert any("operation is in progress" in str(m.get("message")) for m in pushed if m["type"] == "log")
+
+
+def test_reboot_cancel_is_honest(monkeypatch, tmp_path):
+    import json
+
+    audit_path = tmp_path / "audit.log"
+    server = web_server.DrainoServer(role_names=["admin"], audit_log=str(audit_path))
+    state = _drained_compute_state()
+    server.node_states["node-1"] = state
+
+    pushed: list[dict] = []
+    server._push = pushed.append
+
+    server.action_reboot_cancel("node-1")
+    assert any("no reboot was issued" in str(m.get("message")) for m in pushed)
+
+    state.phase = NodePhase.REBOOTING
+    pushed.clear()
+    server.action_reboot_cancel("node-1")
+    assert any("cannot be cancelled" in str(m.get("message")) for m in pushed)
+
+    entries = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert entries[0]["event"] == "cancelled"
+    assert entries[1]["event"] == "failed"
+    assert "cancel refused" in entries[1]["detail"]
+
+
+def test_etcd_reboot_blocks_unlabeled_member(monkeypatch, tmp_path):
+    server = web_server.DrainoServer(role_names=["admin"], audit_log=str(tmp_path / "audit.log"))
+    server.node_states["node-x"] = _drained_compute_state("node-x")
+
+    monkeypatch.setattr(web_server.k8s_ops, "get_etcd_member_node_names", lambda auth=None: {"node-x"})
+    pushed: list[dict] = []
+    server._push = pushed.append
+
+    server._etcd_reboot_preflight_bg("node-x")
+
+    blocked = [m for m in pushed if m["type"] == "reboot_blocked"]
+    assert blocked and "lacks the node-role.kubernetes.io/etcd label" in blocked[0]["detail"]
+
+
+def test_etcd_reboot_fails_closed_on_unknown_membership(monkeypatch, tmp_path):
+    server = web_server.DrainoServer(role_names=["admin"], audit_log=str(tmp_path / "audit.log"))
+    server.node_states["node-x"] = _drained_compute_state("node-x")
+
+    def _boom(auth=None):
+        raise RuntimeError("etcd unreachable")
+
+    monkeypatch.setattr(web_server.k8s_ops, "get_etcd_member_node_names", _boom)
+    pushed: list[dict] = []
+    server._push = pushed.append
+
+    server._etcd_reboot_preflight_bg("node-x")
+
+    blocked = [m for m in pushed if m["type"] == "reboot_blocked"]
+    assert blocked and "could not be determined" in blocked[0]["detail"]

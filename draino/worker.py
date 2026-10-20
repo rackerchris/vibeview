@@ -42,6 +42,10 @@ def run_reboot(
     log_cb: LogFn,
     audit_cb: Optional[AuditCb] = None,
     k8s_auth: Optional[k8s_ops.K8sAuth] = None,
+    *,
+    issue_reboot_fn: Optional[Callable[..., None]] = None,
+    phase_already_claimed: bool = False,
+    operator: Optional[str] = None,
 ) -> None:
     """Issue a reboot and track downtime.  Runs in a daemon thread."""
     workflows_maintenance.run_reboot(
@@ -49,10 +53,12 @@ def run_reboot(
         update_cb,
         log_cb,
         k8s_ops=k8s_ops,
-        issue_reboot_fn=issue_reboot,
+        issue_reboot_fn=issue_reboot_fn or issue_reboot,
         time_module=time,
         audit_cb=audit_cb,
         k8s_auth=k8s_auth,
+        phase_already_claimed=phase_already_claimed,
+        operator=operator,
     )
 
 

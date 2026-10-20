@@ -198,9 +198,15 @@ def _clear_runtime_diagnostics(record: SessionRecord, action: str) -> dict:
             "cleared": record.server.clear_runtime_caches(),
         }
     if action == "sweep_expired_sessions":
+        expired = _sessions.take_expired()
+        for expired_record in expired:
+            try:
+                expired_record.server.close()
+            except Exception:
+                pass
         return {
             "action": action,
-            "cleared": {"expired_sessions": _sessions.sweep_expired()},
+            "cleared": {"expired_sessions": len(expired)},
         }
     if action == "clear_global_runtime_caches":
         return {

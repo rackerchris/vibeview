@@ -1,18 +1,16 @@
 """Compliance audit logger — writes structured JSONL entries to a file."""
 from __future__ import annotations
 
-import getpass
 import json
 import logging
-import os
 import socket
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 _DEFAULT_PATH = Path.home() / ".draino" / "audit.log"
+_UNKNOWN = "unknown"
 _LOGGER = logging.getLogger("draino.audit")
 
 
@@ -22,12 +20,12 @@ class AuditLogger:
     Writes one JSON object per line (JSONL) to *path*.  Each entry has:
 
         timestamp   ISO-8601 UTC time of the event
-        user        OS username of the operator
+        user        authenticated operator identity (required per entry)
         hostname    Machine running draino
-        session_id  UUID, unique per draino invocation
-        action      evacuation | enable_nova | drain_quick | undrain | reboot
+        session_id  caller-supplied session identifier (required per entry)
+        action      evacuation | enable_nova | drain_quick | undrain | reboot | session
         node        Kubernetes node name
-        event       started | completed | failed | blocked | cancelled
+        event       started | completed | failed | blocked | cancelled | abandoned
         detail      Free-form context string (step detail, error text, etc.)
     """
 
@@ -35,8 +33,6 @@ class AuditLogger:
         self._path = Path(path) if path else _DEFAULT_PATH
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._session_id = str(uuid.uuid4())
-        self._user = _get_user()
         self._machine = socket.gethostname()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -47,13 +43,21 @@ class AuditLogger:
         node: str,
         event: str,
         detail: str = "",
+        *,
+        user: str,
+        session_id: str,
     ) -> None:
-        """Append one audit entry to the log file (thread-safe)."""
+        """Append one audit entry to the log file (thread-safe).
+
+        ``user`` and ``session_id`` are mandatory: every entry must carry the
+        authenticated operator identity and the login session that performed
+        the action, otherwise the log cannot attribute operator actions.
+        """
         entry: dict = {
             "timestamp":  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "user":       self._user,
+            "user":       user or _UNKNOWN,
             "hostname":   self._machine,
-            "session_id": self._session_id,
+            "session_id": session_id or _UNKNOWN,
             "action":     action,
             "node":       node,
             "event":      event,
@@ -69,10 +73,3 @@ class AuditLogger:
     @property
     def path(self) -> Path:
         return self._path
-
-
-def _get_user() -> str:
-    try:
-        return getpass.getuser()
-    except Exception:
-        return os.environ.get("USER", os.environ.get("USERNAME", "unknown"))

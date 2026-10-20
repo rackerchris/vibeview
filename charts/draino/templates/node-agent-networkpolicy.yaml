@@ -1,0 +1,27 @@
+{{- if .Values.nodeAgent.networkPolicy.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "draino.nodeAgentName" . }}
+  labels:
+    {{- include "draino.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node-agent
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "draino.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: node-agent
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only the VibeView web pods may reach the agent API (kubelet probes are
+    # excluded by design; the agent's probes stay decorative until the
+    # localhost-only probe port from the hardening plan lands).
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "draino.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.nodeAgent.port }}
+{{- end -}}

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from typing import Optional, Set
 
 from fastapi import WebSocket
@@ -30,12 +31,16 @@ class DrainoServer(InventoryRefreshMixin, InventoryActionsMixin):
         openstack_auth: Optional[openstack_ops.OpenStackAuth] = None,
         role_names: Optional[list[str]] = None,
         audit_log: Optional[str] = None,
+        operator_username: str = "",
     ) -> None:
         self.k8s_auth = k8s_auth
         self.openstack_auth = openstack_auth
         self.role_names = role_names or []
         self.is_admin = any(role.lower() == "admin" for role in self.role_names)
         self._audit = AuditLogger(path=audit_log)
+        self.operator_username = operator_username
+        self.session_id = ""
+        self._action_lock = threading.Lock()
 
         self.node_states: dict[str, NodeState] = {}
         self._last_k8s_nodes: list[dict] = []
@@ -98,10 +103,19 @@ class DrainoServer(InventoryRefreshMixin, InventoryActionsMixin):
             self._push({"type": "log", "node": node_name, "message": msg, "color": color})
         return cb
 
+    def log_audit(self, action: str, node: str, event: str, detail: str = "") -> None:
+        self._audit.log(action, node, event, detail, user=self.operator_username, session_id=self.session_id)
+
     def _audit_cb(self, action: str, node_name: str):
         def cb(event: str, detail: str = "") -> None:
-            self._audit.log(action, node_name, event, detail)
+            self.log_audit(action, node_name, event, detail)
         return cb
+
+    def close(self) -> None:
+        """Tear down per-session resources (kubeconfig temp dirs with live credentials)."""
+        self.log_audit("session", "-", "ended", "web ui session closed")
+        if self.k8s_auth is not None:
+            k8s_ops.dispose_auth_temp_dir(self.k8s_auth)
 
     def cache_stats(self) -> dict:
         return {

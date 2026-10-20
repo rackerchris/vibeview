@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from openstack import exceptions as openstack_exceptions
+
 from .models import InstanceInfo, NodePhase, NodeState, StepStatus
 from . import workflows_maintenance
 
@@ -117,7 +119,7 @@ def run_workflow(
             try:
                 openstack_ops.live_migrate_server(inst.id, ctx.log, auth=openstack_auth)
                 inst.migration_status = "migrating"
-            except Exception as live_exc:
+            except openstack_exceptions.HttpException as live_exc:
                 task_state = openstack_ops.get_server_task_state(inst.id, auth=openstack_auth) or ""
                 if "migrat" in task_state.lower():
                     ctx.log(
@@ -133,6 +135,11 @@ def run_workflow(
                     except Exception as cold_exc:
                         ctx.log(f"Cold migration also failed for '{inst.name}': {cold_exc}")
                         inst.migration_status = "failed"
+            except Exception as live_exc:
+                # Non-API failures (network, SDK) must not silently degrade a
+                # live migration into a downtime cold migration.
+                ctx.log(f"Live migration trigger failed for '{inst.name}': {live_exc}")
+                inst.migration_status = "failed"
             update_cb()
 
         deadline = time_module.time() + MIGRATE_TIMEOUT

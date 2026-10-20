@@ -25,8 +25,8 @@ def is_ready_for_reboot(state: NodeState) -> tuple[bool, str]:
     return True, ""
 
 
-def issue_reboot(state: NodeState, log: LogFn) -> None:
-    body = node_agent_client.post_reboot(state.k8s_name, state.hypervisor)
+def issue_reboot(state: NodeState, log: LogFn, *, requested_by: str | None = None, reason: str | None = None) -> None:
+    body = node_agent_client.post_reboot(state.k8s_name, state.hypervisor, requested_by=requested_by, reason=reason)
     if not body.get("accepted"):
         raise RuntimeError("node-agent rejected the reboot request")
     log(f"Reboot command accepted by node-agent for '{state.k8s_name}'")

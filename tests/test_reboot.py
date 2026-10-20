@@ -69,7 +69,7 @@ def test_issue_reboot_uses_node_agent(monkeypatch):
     monkeypatch.setattr(
         node_agent_client,
         "post_reboot",
-        lambda node_name, hypervisor: {"accepted": True, "node": node_name, "hypervisor": hypervisor},
+        lambda node_name, hypervisor, requested_by=None, reason=None: {"accepted": True, "node": node_name, "hypervisor": hypervisor, "requested_by": requested_by},
     )
 
     state = NodeState(k8s_name="node-1", hypervisor="hv-1")
@@ -77,3 +77,19 @@ def test_issue_reboot_uses_node_agent(monkeypatch):
     reboot.issue_reboot(state, log_messages.append)
 
     assert "accepted by node-agent" in log_messages[0]
+
+
+def test_issue_reboot_forwards_operator_identity(monkeypatch):
+    monkeypatch.setattr(node_agent_client, "enabled", lambda: True)
+    captured: dict = {}
+
+    def _capture(node_name, hypervisor, requested_by=None, reason=None):
+        captured.update(node=node_name, requested_by=requested_by, reason=reason)
+        return {"accepted": True}
+
+    monkeypatch.setattr(node_agent_client, "post_reboot", _capture)
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1")
+
+    reboot.issue_reboot(state, lambda msg: None, requested_by="alice", reason="kernel patch")
+
+    assert captured == {"node": "node-1", "requested_by": "alice", "reason": "kernel patch"}

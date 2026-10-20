@@ -83,7 +83,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: DRAINO_NODE_AGENT_TOKEN_FILE
-              value: /var/run/draino-node-agent/token
+              value: /var/run/draino-node-agent-token/token
             - name: DRAINO_NODE_AGENT_TLS_CERT_FILE
               value: /var/run/draino-node-agent/tls.crt
             - name: DRAINO_NODE_AGENT_TLS_KEY_FILE
@@ -93,13 +93,19 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            - name: node-agent-auth
+            - name: node-agent-tls
               mountPath: /var/run/draino-node-agent
               readOnly: true
+            - name: node-agent-token
+              mountPath: /var/run/draino-node-agent-token
+              readOnly: true
       volumes:
-        - name: node-agent-auth
+        - name: node-agent-tls
           secret:
-            secretName: {{ include "draino.nodeAgentSecretName" . }}
+            secretName: {{ include "draino.nodeAgentTlsSecretName" . }}
+        - name: node-agent-token
+          secret:
+            secretName: {{ include "draino.nodeAgentTokenSecretName" . }}
       {{- with .Values.nodeAgent.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

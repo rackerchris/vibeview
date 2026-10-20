@@ -34,33 +34,54 @@ class SessionStore:
 
     def put(self, record: SessionRecord) -> None:
         with self._lock:
-            self._sweep_expired_locked(time.time())
+            expired = self._take_expired_locked(time.time())
             self._sessions[record.session_id] = record
+        for expired_record in expired:
+            self._close_quietly(expired_record)
 
     def get(self, session_id: str | None) -> SessionRecord | None:
         if not session_id:
             return None
+        expired: SessionRecord | None = None
         with self._lock:
             record = self._sessions.get(session_id)
-            if record is None:
-                return None
-            now = time.time()
-            if now - record.last_seen > self._ttl_seconds:
-                self._sessions.pop(session_id, None)
-                return None
-            record.last_seen = now
-            return record
+            if record is not None:
+                now = time.time()
+                if now - record.last_seen > self._ttl_seconds:
+                    expired = self._sessions.pop(session_id, None)
+                else:
+                    record.last_seen = now
+        if expired is not None:
+            self._close_quietly(expired)
+            return None
+        return record
 
-    def delete(self, session_id: str | None) -> None:
+    def delete(self, session_id: str | None) -> SessionRecord | None:
         if not session_id:
-            return
+            return None
         with self._lock:
-            self._sessions.pop(session_id, None)
+            return self._sessions.pop(session_id, None)
 
     def sweep_expired(self, now: float | None = None) -> int:
         check_time = time.time() if now is None else now
         with self._lock:
-            return self._sweep_expired_locked(check_time)
+            expired = self._take_expired_locked(check_time)
+        for record in expired:
+            self._close_quietly(record)
+        return len(expired)
+
+    def take_expired(self, now: float | None = None) -> list[SessionRecord]:
+        """Atomically remove and return expired records so callers can release their resources."""
+        check_time = time.time() if now is None else now
+        with self._lock:
+            return self._take_expired_locked(check_time)
+
+    @staticmethod
+    def _close_quietly(record: SessionRecord) -> None:
+        try:
+            record.server.close()
+        except Exception:
+            pass
 
     def stats(self, now: float | None = None) -> dict:
         check_time = time.time() if now is None else now
@@ -87,14 +108,19 @@ class SessionStore:
             }
 
     def _sweep_expired_locked(self, check_time: float) -> int:
+        expired = self._take_expired_locked(check_time)
+        return len(expired)
+
+    def _take_expired_locked(self, check_time: float) -> list[SessionRecord]:
         expired_ids = [
             session_id
             for session_id, record in self._sessions.items()
             if (check_time - record.last_seen) > self._ttl_seconds
         ]
+        expired = []
         for session_id in expired_ids:
-            self._sessions.pop(session_id, None)
-        return len(expired_ids)
+            expired.append(self._sessions.pop(session_id))
+        return expired
 
 
 def get_session_record(request: Request, sessions: SessionStore, cookie_name: str) -> SessionRecord:

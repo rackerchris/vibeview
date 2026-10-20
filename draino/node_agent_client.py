@@ -48,7 +48,7 @@ def load_config_from_env() -> NodeAgentConfig:
     )
 
 
-def post_reboot(node_name: str, hypervisor: str) -> dict:
+def post_reboot(node_name: str, hypervisor: str, *, requested_by: str | None = None, reason: str | None = None) -> dict:
     return _request_json(
         node_name,
         "POST",
@@ -57,6 +57,8 @@ def post_reboot(node_name: str, hypervisor: str) -> dict:
             "request_id": secrets.token_hex(8),
             "expected_node": node_name,
             "hypervisor": hypervisor,
+            "requested_by": requested_by,
+            "reason": reason,
         },
     )
 
@@ -172,6 +174,10 @@ def _request_json(
         },
     )
     ssl_context = ssl.create_default_context(cafile=config_data.ca_file)
+    # The agent is dialed by resolved Pod IP, so there is no hostname to
+    # verify against the cert's SAN; identity rests on the pinned CA
+    # (cafile above) plus the shared bearer token.  Tightening this means
+    # per-node certs with IP SANs (see docs/adversarial-scan-report.md C1/L1).
     ssl_context.check_hostname = False
 
     try:

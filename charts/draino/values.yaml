@@ -29,6 +29,11 @@ service:
 nodeAgent:
   profile: unprivileged
   port: 8443
+  networkPolicy:
+    # Restrict agent ingress to the VibeView web pods. Requires a CNI that
+    # enforces NetworkPolicy; enabling kubelet probes still work (they bypass
+    # policy on most CNIs) — verify before enabling on managed clusters.
+    enabled: true
   labelSelector: ""
   updateStrategy:
     type: RollingUpdate
@@ -67,14 +72,18 @@ nodeAgent:
   privilegedSecurityContext:
     privileged: true
     allowPrivilegeEscalation: true
-    readOnlyRootFilesystem: false
+    readOnlyRootFilesystem: true
+    seccompProfile:
+      type: RuntimeDefault
     runAsNonRoot: false
     runAsUser: 0
     runAsGroup: 0
   unprivilegedSecurityContext:
     privileged: false
     allowPrivilegeEscalation: false
-    readOnlyRootFilesystem: false
+    readOnlyRootFilesystem: true
+    seccompProfile:
+      type: RuntimeDefault
     runAsNonRoot: true
     runAsUser: 10001
     runAsGroup: 10001

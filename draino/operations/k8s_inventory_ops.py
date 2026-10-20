@@ -86,6 +86,11 @@ def get_etcd_node_names(auth: K8sAuth | None = None) -> set[str]:
     return _utils.get_etcd_node_names(auth=auth)
 
 
+def get_etcd_member_node_names(auth: K8sAuth | None = None) -> set[str]:
+    _sync_inventory_modules()
+    return _utils.get_etcd_member_node_names(auth=auth)
+
+
 def get_mariadb_node_names(auth: K8sAuth | None = None) -> set[str]:
     _sync_inventory_modules()
     return _utils.get_mariadb_node_names(auth=auth)

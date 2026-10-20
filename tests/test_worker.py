@@ -93,9 +93,9 @@ def test_run_reboot_uncordons_node_after_return(monkeypatch):
     state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=True)
 
     k8s_auth = K8sAuth(server="https://cluster.example", token="token-1")
-    clock = _fake_clock(1000.0, 1000.0, 1301.0, 1301.0, 1301.0, 1302.0, 1302.0)
+    clock = _realistic_clock()
 
-    monkeypatch.setattr(worker, "issue_reboot", lambda state, log: events.append(("reboot", None)))
+    monkeypatch.setattr(worker, "issue_reboot", lambda state, log, requested_by=None: events.append(("reboot", requested_by)))
     monkeypatch.setattr(worker.time, "time", clock)
     monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(
@@ -103,7 +103,7 @@ def test_run_reboot_uncordons_node_after_return(monkeypatch):
         "get_nodes",
         _fake_nodes(
             [{"name": "node-1", "ready": True, "ready_since": "before-reboot"}],
-            [{"name": "node-1", "ready": True, "ready_since": "before-reboot"}],
+            [{"name": "node-1", "ready": False, "ready_since": "before-reboot"}],
             [{"name": "node-1", "ready": True, "ready_since": "after-reboot"}],
         ),
     )
@@ -124,13 +124,14 @@ def test_run_reboot_uncordons_node_after_return(monkeypatch):
     assert state.phase == NodePhase.IDLE
     assert state.k8s_cordoned is False
     assert state.get_step("uncordon").status == StepStatus.SUCCESS
+    assert state.get_step("await_offline").status == StepStatus.SUCCESS
 
 
 def test_run_reboot_fails_if_auto_uncordon_fails(monkeypatch):
     state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=True)
-    clock = _fake_clock(1000.0, 1000.0, 1301.0, 1301.0, 1301.0, 1302.0, 1302.0)
+    clock = _realistic_clock()
 
-    monkeypatch.setattr(worker, "issue_reboot", lambda state, log: None)
+    monkeypatch.setattr(worker, "issue_reboot", lambda state, log, requested_by=None: None)
     monkeypatch.setattr(worker.time, "time", clock)
     monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
     monkeypatch.setattr(
@@ -138,7 +139,7 @@ def test_run_reboot_fails_if_auto_uncordon_fails(monkeypatch):
         "get_nodes",
         _fake_nodes(
             [{"name": "node-1", "ready": True, "ready_since": "before-reboot"}],
-            [{"name": "node-1", "ready": True, "ready_since": "before-reboot"}],
+            [{"name": "node-1", "ready": False, "ready_since": "before-reboot"}],
             [{"name": "node-1", "ready": True, "ready_since": "after-reboot"}],
         ),
     )
@@ -337,3 +338,92 @@ def test_run_workflow_is_noop_when_already_evacuated(monkeypatch):
     assert state.nova_evacuation_status == "evacuated"
     assert state.nova_evacuation_detail == "compute service disabled and hypervisor already empty"
     assert logs == ["'node-1' already evacuated — no Nova action needed"]
+
+
+def _realistic_clock(start: float = 1000.0, step: float = 100.0):
+    now = {"value": start}
+
+    def _time() -> float:
+        value = now["value"]
+        now["value"] += step
+        return value
+
+    return _time
+
+
+def test_run_reboot_refuses_without_valid_ready_baseline(monkeypatch):
+    events: list[tuple[str, object]] = []
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=True)
+
+    def _boom(auth=None):
+        raise RuntimeError("api down")
+
+    monkeypatch.setattr(worker, "issue_reboot", lambda state, log, requested_by=None: events.append(("reboot", requested_by)))
+    monkeypatch.setattr(worker.time, "time", _realistic_clock())
+    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(worker.k8s_ops, "get_nodes", _boom)
+
+    audits: list[tuple[str, str]] = []
+    worker.run_reboot(
+        state,
+        update_cb=lambda: None,
+        log_cb=lambda msg: None,
+        audit_cb=lambda event, detail="": audits.append((event, detail)),
+    )
+
+    assert events == []
+    assert state.phase == NodePhase.ERROR
+    assert state.get_step("issue_reboot").status == StepStatus.FAILED
+    assert ("failed", "step=issue_reboot reason=Cannot capture Ready baseline — refusing to reboot without a valid recovery baseline") in audits
+
+
+def test_run_reboot_does_not_report_recovery_when_node_never_left_ready(monkeypatch):
+    events: list[tuple[str, object]] = []
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=True)
+
+    monkeypatch.setattr(worker, "issue_reboot", lambda state, log, requested_by=None: events.append(("reboot", requested_by)))
+    monkeypatch.setattr(worker.time, "time", _realistic_clock(step=500.0))
+    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        worker.k8s_ops,
+        "get_nodes",
+        _fake_nodes([{"name": "node-1", "ready": True, "ready_since": "unchanged"}]),
+    )
+    monkeypatch.setattr(
+        worker.k8s_ops,
+        "uncordon_node",
+        lambda name, log, auth=None: events.append(("uncordon", auth)),
+    )
+
+    worker.run_reboot(
+        state,
+        update_cb=lambda: None,
+        log_cb=lambda msg: None,
+    )
+
+    assert events == [("reboot", None)]
+    assert state.phase == NodePhase.ERROR
+    assert state.get_step("await_online").status == StepStatus.FAILED
+
+
+def test_run_reboot_forwards_operator_to_issue_reboot(monkeypatch):
+    events: list[tuple[str, object]] = []
+    state = NodeState(k8s_name="node-1", hypervisor="hv-1", k8s_cordoned=True)
+
+    monkeypatch.setattr(worker, "issue_reboot", lambda state, log, requested_by=None: events.append(("reboot", requested_by)))
+    monkeypatch.setattr(worker.time, "time", _realistic_clock())
+    monkeypatch.setattr(worker.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        worker.k8s_ops,
+        "get_nodes",
+        _fake_nodes(
+            [{"name": "node-1", "ready": True, "ready_since": "before-reboot"}],
+            [{"name": "node-1", "ready": False, "ready_since": "before-reboot"}],
+            [{"name": "node-1", "ready": True, "ready_since": "after-reboot"}],
+        ),
+    )
+    monkeypatch.setattr(worker.k8s_ops, "uncordon_node", lambda name, log, auth=None: None)
+
+    worker.run_reboot(state, update_cb=lambda: None, log_cb=lambda msg: None, operator="alice")
+
+    assert events[0] == ("reboot", "alice")

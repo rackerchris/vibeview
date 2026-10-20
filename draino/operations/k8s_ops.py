@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -105,9 +106,21 @@ def _kubeconfig_dict(auth: K8sAuth) -> dict:
 def _write_kubeconfig(auth: K8sAuth) -> str:
     temp_dir = _auth_temp_dir(auth)
     path = os.path.join(temp_dir, "config.yaml")
-    with open(path, "w", encoding="utf-8") as fh:
+    # Contains live bearer tokens / client keys: create with 0600 directly
+    # instead of relying on umask.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         yaml.safe_dump(_kubeconfig_dict(auth), fh, sort_keys=False)
+    os.chmod(path, 0o600)
     return path
+
+
+def dispose_auth_temp_dir(auth: K8sAuth) -> None:
+    """Remove the session's kubeconfig temp dir (holds live credentials)."""
+    temp_dir = auth.temp_dir
+    auth.temp_dir = None
+    if temp_dir:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _api_client(auth: K8sAuth | None = None) -> client.ApiClient:
@@ -155,6 +168,7 @@ from .k8s_inventory_ops import (
     list_k8s_daemonsets,
     list_k8s_deployments,
     get_etcd_node_names,
+    get_etcd_member_node_names,
     list_k8s_gatewayclasses,
     list_k8s_gateways,
     list_k8s_httproutes,

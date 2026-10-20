@@ -23,6 +23,7 @@ _sessions_getter: Callable[[], SessionStore] | None = None
 _app_loop_getter: Callable[[], asyncio.AbstractEventLoop | None] | None = None
 _audit_log_path_getter: Callable[[], str | None] | None = None
 _LOGIN_TIMEOUT_SECONDS = float(os.getenv("DRAINO_LOGIN_TIMEOUT_SECONDS", "15"))
+_TRUST_PROXY_HEADERS = os.getenv("DRAINO_TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes"}
 
 
 def configure(
@@ -58,12 +59,20 @@ def _get_audit_log_path() -> str | None:
 
 
 def _request_is_secure(request: Request) -> bool:
-    forwarded = request.headers.get("forwarded", "")
-    if forwarded and "proto=https" in forwarded.lower():
-        return True
-    forwarded_proto = request.headers.get("x-forwarded-proto", "")
-    if forwarded_proto:
-        return forwarded_proto.split(",", 1)[0].strip().lower() == "https"
+    """Decide whether to set the ``secure`` cookie flag.
+
+    Forwarded-proto headers are honoured only when the deployment has opted in
+    via ``DRAINO_TRUST_PROXY_HEADERS=true`` (the chart sets it behind the
+    Gateway). Without the opt-in a spoofed header can neither flip ``secure``
+    on nor — more importantly — mask a plaintext transport.
+    """
+    if _TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("forwarded", "")
+        if forwarded and "proto=https" in forwarded.lower():
+            return True
+        forwarded_proto = request.headers.get("x-forwarded-proto", "")
+        if forwarded_proto:
+            return forwarded_proto.split(",", 1)[0].strip().lower() == "https"
     return request.url.scheme.lower() == "https"
 
 
@@ -165,22 +174,25 @@ async def api_login(payload: LoginPayload, request: Request, response: Response)
                 status_code=400,
                 detail=f"OpenStack role lookup timed out after {_LOGIN_TIMEOUT_SECONDS:.0f}s",
             ) from exc
+    operator_username = openstack_auth.username if openstack_auth else ""
     server = DrainoServer(
         k8s_auth=k8s_auth,
         openstack_auth=openstack_auth,
         role_names=role_names,
         audit_log=_get_audit_log_path(),
+        operator_username=operator_username,
     )
     app_loop = _get_app_loop()
     if app_loop is not None:
         server.set_loop(app_loop)
-    server._audit.log("session", "-", "started", "web ui user-authenticated session")
     session_id = secrets.token_urlsafe(32)
+    server.session_id = session_id
+    server.log_audit("session", "-", "started", "web ui user-authenticated session")
     now = time.time()
     sessions.put(SessionRecord(
         session_id=session_id,
         server=server,
-        username=(openstack_auth.username if openstack_auth else ""),
+        username=operator_username,
         project_name=(openstack_auth.project_name if openstack_auth else ""),
         role_names=role_names,
         is_admin=server.is_admin,
@@ -202,6 +214,8 @@ async def api_login(payload: LoginPayload, request: Request, response: Response)
 @router.delete("/api/session")
 async def api_logout(request: Request, response: Response):
     _, sessions = _require_configured()
-    sessions.delete(request.cookies.get("draino_session"))
+    record = sessions.delete(request.cookies.get("draino_session"))
+    if record is not None:
+        record.server.close()
     response.delete_cookie("draino_session")
     return {"ok": True}

@@ -164,17 +164,29 @@ async def api_node_detail(node_name: str, request: Request):
         api_issue = None
         if state and state.is_compute and server.openstack_auth is not None:
             try:
-                nova = await loop.run_in_executor(None, openstack_ops.get_hypervisor_detail, state.hypervisor, server.openstack_auth)
+                nova = await asyncio.wait_for(
+                    loop.run_in_executor(None, openstack_ops.get_hypervisor_detail, state.hypervisor, server.openstack_auth),
+                    timeout=_RESOURCE_DETAIL_TIMEOUT_SECONDS,
+                )
             except Exception as exc:
                 api_issue = build_api_issue("Nova", f"GET /os-hypervisors/{state.hypervisor}", exc)
                 nova = {}
             try:
-                placement = await loop.run_in_executor(None, openstack_ops.get_hypervisor_placement_detail, state.hypervisor, server.openstack_auth)
+                placement = await asyncio.wait_for(
+                    loop.run_in_executor(None, openstack_ops.get_hypervisor_placement_detail, state.hypervisor, server.openstack_auth),
+                    timeout=_RESOURCE_DETAIL_TIMEOUT_SECONDS,
+                )
             except Exception:
                 placement = {}
 
-        k8s = await k8s_future
-        hw = await hw_future
+        try:
+            k8s = await asyncio.wait_for(k8s_future, timeout=_RESOURCE_DETAIL_TIMEOUT_SECONDS)
+        except Exception as exc:
+            k8s = {"error": str(exc)}
+        try:
+            hw = await asyncio.wait_for(hw_future, timeout=_RESOURCE_DETAIL_TIMEOUT_SECONDS)
+        except Exception as exc:
+            hw = {"error": f"Hardware info timed out or failed: {exc}"}
         payload = {"k8s": k8s, "nova": nova, "placement": placement, "hw": hw, "error": None, "api_issue": api_issue}
         server.set_cached_node_detail(node_name, payload)
         return payload

@@ -3,16 +3,30 @@ from __future__ import annotations
 
 import threading
 import time
+from functools import partial
+
+from openstack import exceptions as openstack_exceptions
 
 from .. import worker
 from ..models import NodePhase
 from ..operations import k8s_ops, openstack_ops
-from ..reboot import is_ready_for_reboot
+from ..reboot import is_ready_for_reboot, issue_reboot
 from .latency import measure_latency
 from .serialise import serialise_state as _serialise
 
 
 class InventoryActionsMixin:
+    _action_lock: threading.Lock
+
+    def _claim_phase(self, node_name: str, allowed: tuple[NodePhase, ...], new_phase: NodePhase):
+        """Atomically transition a node's phase, returning the state only if claimed."""
+        with self._action_lock:
+            state = self.node_states.get(node_name)
+            if state is None or state.phase not in allowed:
+                return None
+            state.phase = new_phase
+            return state
+
     def start_preflight(self, node_name: str, silent: bool = False) -> None:
         state = self.node_states.get(node_name)
         if not state or not state.is_compute or state.phase != NodePhase.IDLE:
@@ -65,7 +79,7 @@ class InventoryActionsMixin:
         if not state.is_compute:
             self._push({"type": "log", "node": node_name, "message": "Not a compute node — no evacuation needed.", "color": "warn"})
             return
-        if state.phase == NodePhase.RUNNING:
+        if state.phase in (NodePhase.RUNNING, NodePhase.REBOOTING, NodePhase.UNDRAINING):
             self._push({"type": "log", "node": node_name, "message": "Evacuation already in progress.", "color": "warn"})
             return
         if state.compute_status == "disabled" and (state.vm_count or 0) == 0 and (state.amphora_count or 0) == 0:
@@ -76,7 +90,10 @@ class InventoryActionsMixin:
             self._push({"type": "log", "node": node_name, "message": f"Nova evacuation already complete on {node_name}.", "color": "dim"})
             return
 
-        state.phase = NodePhase.RUNNING
+        state = self._claim_phase(node_name, (NodePhase.IDLE, NodePhase.COMPLETE, NodePhase.ERROR), NodePhase.RUNNING)
+        if state is None:
+            self._push({"type": "log", "node": node_name, "message": "Evacuation already in progress.", "color": "warn"})
+            return
         state.instances = []
         state.log_buffer = []
         state.preflight_instances = []
@@ -103,8 +120,8 @@ class InventoryActionsMixin:
         if not state.is_compute:
             self._push({"type": "log", "node": node_name, "message": "Not a compute node — Nova does not apply here.", "color": "warn"})
             return
-        if state.phase == NodePhase.RUNNING:
-            self._push({"type": "log", "node": node_name, "message": "Cannot re-enable Nova while evacuation is running.", "color": "warn"})
+        if state.phase in (NodePhase.RUNNING, NodePhase.REBOOTING, NodePhase.UNDRAINING):
+            self._push({"type": "log", "node": node_name, "message": "Cannot re-enable Nova while an operation is running.", "color": "warn"})
             return
         if state.compute_status != "disabled":
             self._push({"type": "log", "node": node_name, "message": "Nova compute service is already enabled.", "color": "dim"})
@@ -146,13 +163,15 @@ class InventoryActionsMixin:
 
     def action_drain_quick(self, node_name: str) -> None:
         state = self.node_states.get(node_name)
-        if not state or state.phase == NodePhase.RUNNING:
+        if not state:
             return
         if state.k8s_cordoned and state.k8s_drain_status == "drained":
             self._push({"type": "log", "node": node_name, "message": f"Kubernetes drain already complete on {node_name}.", "color": "dim"})
             return
 
-        state.phase = NodePhase.RUNNING
+        state = self._claim_phase(node_name, (NodePhase.IDLE, NodePhase.COMPLETE, NodePhase.ERROR), NodePhase.RUNNING)
+        if state is None:
+            return
         state.k8s_drain_status = "in_progress"
         state.k8s_drain_detail = "starting kubernetes drain"
         state.init_quick_drain_steps(state.is_compute)
@@ -170,13 +189,15 @@ class InventoryActionsMixin:
 
     def action_undrain(self, node_name: str) -> None:
         state = self.node_states.get(node_name)
-        if not state or state.phase == NodePhase.RUNNING:
+        if not state:
             return
         if not state.k8s_cordoned and state.k8s_drain_status == "clear":
             self._push({"type": "log", "node": node_name, "message": f"Kubernetes scheduling is already enabled on {node_name}.", "color": "dim"})
             return
 
-        state.phase = NodePhase.UNDRAINING
+        state = self._claim_phase(node_name, (NodePhase.IDLE, NodePhase.COMPLETE, NodePhase.ERROR), NodePhase.UNDRAINING)
+        if state is None:
+            return
         state.k8s_drain_detail = "clearing kubernetes drain posture"
         state.init_undrain_steps(state.is_compute)
 
@@ -193,9 +214,8 @@ class InventoryActionsMixin:
 
     def action_reboot_request(self, node_name: str) -> None:
         if not self.is_admin:
-            detail = "Reboot requires the OpenStack 'admin' role."
-            self._audit.log("reboot", node_name, "blocked", detail)
-            self._push({"type": "log", "node": node_name, "message": detail, "color": "warn"})
+            self.log_audit("reboot", node_name, "blocked", "Reboot requires the OpenStack 'admin' role.")
+            self._push({"type": "log", "node": node_name, "message": "Reboot requires the OpenStack 'admin' role.", "color": "warn"})
             return
         state = self.node_states.get(node_name)
         if not state:
@@ -211,7 +231,35 @@ class InventoryActionsMixin:
         else:
             self._push({"type": "reboot_confirm_needed", "node": node_name})
 
+    def _etcd_membership_check(self, node_name: str) -> str | None:
+        """Classify a node against the cluster's etcd role set (fail closed).
+
+        The authoritative source in this cluster is the
+        ``node-role.kubernetes.io/etcd`` label (there is no in-cluster etcdctl
+        endpoint to cross-check against).  An empty or unreachable label set
+        means membership is unknown and the caller must refuse the reboot.
+        """
+        try:
+            members = k8s_ops.get_etcd_member_node_names(self.k8s_auth)
+        except Exception:
+            return None
+        return "member" if node_name in members else "non-member"
+
     def _etcd_reboot_preflight_bg(self, node_name: str) -> None:
+        membership = self._etcd_membership_check(node_name)
+        if membership is None:
+            detail = "etcd cluster membership could not be determined; refusing reboot without a quorum guard"
+            self.log_audit("reboot", node_name, "blocked", detail)
+            self._push({"type": "reboot_blocked", "node": node_name, "detail": detail})
+            return
+        if membership == "member":
+            state = self.node_states.get(node_name)
+            if state is not None and not state.is_etcd:
+                detail = "node is an etcd member but lacks the node-role.kubernetes.io/etcd label; fix the label before rebooting"
+                self.log_audit("reboot", node_name, "blocked", detail)
+                self._push({"type": "reboot_blocked", "node": node_name, "detail": detail})
+            return
+
         etcd_states = [state for state in self.node_states.values() if state.is_etcd]
         etcd_total = len(etcd_states)
         quorum_needed = (etcd_total // 2) + 1
@@ -229,34 +277,68 @@ class InventoryActionsMixin:
 
         if remaining < quorum_needed:
             detail = f"{healthy_count}/{etcd_total} healthy, rebooting would leave {remaining} (quorum={quorum_needed})"
-            self._audit.log("reboot", node_name, "blocked", detail)
+            self.log_audit("reboot", node_name, "blocked", detail)
             self._push({"type": "reboot_blocked", "node": node_name, "detail": detail})
         else:
             self._push({"type": "reboot_confirm_needed", "node": node_name})
 
     def action_reboot_confirm(self, node_name: str) -> None:
         if not self.is_admin:
-            detail = "Reboot requires the OpenStack 'admin' role."
-            self._audit.log("reboot", node_name, "blocked", detail)
-            self._push({"type": "log", "node": node_name, "message": detail, "color": "warn"})
+            self.log_audit("reboot", node_name, "blocked", "Reboot requires the OpenStack 'admin' role.")
+            self._push({"type": "log", "node": node_name, "message": "Reboot requires the OpenStack 'admin' role.", "color": "warn"})
             return
-        state = self.node_states.get(node_name)
-        if not state:
-            return
+        with self._action_lock:
+            state = self.node_states.get(node_name)
+            if state is None:
+                return
+            reboot_ready, detail = is_ready_for_reboot(state)
+            if not reboot_ready:
+                self._push({"type": "log", "node": node_name, "message": detail, "color": "warn"})
+                return
+            state.phase = NodePhase.REBOOTING
+        # Steps are initialised before the thread starts so no poller can
+        # observe a REBOOTING node without its step list.
+        state.reboot_start = time.time()
+        state.reboot_downtime = None
+        state.etcd_healthy = False
+        state.init_reboot_steps()
+        self._push({"type": "state_update", "node": node_name, "data": _serialise(state)})
 
         audit_cb = self._audit_cb("reboot", node_name)
         audit_cb("started", f"hypervisor={state.hypervisor}")
         self._push({"type": "log", "node": node_name, "message": f"Rebooting {node_name}…", "color": "important"})
 
         threading.Thread(
-            target=worker.run_reboot,
-            args=(state, self._update_cb(node_name), self._log_cb(node_name, "magenta"), audit_cb, self.k8s_auth),
+            target=partial(
+                worker.run_reboot,
+                issue_reboot_fn=issue_reboot,
+                phase_already_claimed=True,
+            ),
+            args=(state, self._update_cb(node_name), self._log_cb(node_name, "magenta")),
+            kwargs={
+                "audit_cb": audit_cb,
+                "k8s_auth": self.k8s_auth,
+                "operator": self.operator_username or None,
+            },
             daemon=True,
         ).start()
 
     def action_reboot_cancel(self, node_name: str) -> None:
-        self._audit.log("reboot", node_name, "cancelled")
-        self._push({"type": "log", "node": node_name, "message": "Reboot cancelled.", "color": "dim"})
+        """Cancel a reboot only while it is still merely *pending confirmation*.
+
+        A reboot that was already confirmed (phase REBOOTING with the command
+        issued to the node agent) cannot be reversed; the UI must not offer
+        cancel in that window, and if it tries we say so honestly instead of
+        writing a false 'cancelled' record.
+        """
+        state = self.node_states.get(node_name)
+        if state is not None and state.phase == NodePhase.REBOOTING:
+            detail = "reboot already issued to the node agent — cannot be reversed"
+            self.log_audit("reboot", node_name, "failed", f"cancel refused: {detail}")
+            self._push({"type": "log", "node": node_name, "message": f"Reboot cannot be cancelled: {detail}.", "color": "warn"})
+            return
+        self.log_audit("reboot", node_name, "cancelled", "pending reboot confirmation discarded")
+        self._push({"type": "log", "node": node_name, "message": "Reboot confirmation discarded — no reboot was issued.", "color": "dim"})
 
     def action_migrate_instance(self, node_name: str, instance_id: str) -> None:
         state = self.node_states.get(node_name)
@@ -275,7 +357,9 @@ class InventoryActionsMixin:
         log = self._log_cb(node_name)
         try:
             openstack_ops.live_migrate_server(instance_id, log, auth=self.openstack_auth)
-        except Exception as exc:
+        except openstack_exceptions.HttpException as exc:
+            # Only API-level rejections justify a cold-migration fallback; a
+            # network/SDK error here is not evidence the live path is unsupported.
             task_state = openstack_ops.get_server_task_state(instance_id, auth=self.openstack_auth) or ""
             if "migrat" in task_state.lower():
                 log(f"Live migration for {instance_id} timed out but instance is already migrating")
@@ -287,6 +371,10 @@ class InventoryActionsMixin:
                     log(f"Migration trigger failed for {instance_id}: {cold_exc}")
                     self._push({"type": "instance_migrate_status", "node": node_name, "instance_id": instance_id, "status": "error"})
                     return
+        except Exception as exc:
+            log(f"Migration trigger failed for {instance_id}: {exc}")
+            self._push({"type": "instance_migrate_status", "node": node_name, "instance_id": instance_id, "status": "error"})
+            return
 
         deadline = time.time() + 600
         time.sleep(3)

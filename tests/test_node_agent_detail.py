@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import urllib.error
 from types import SimpleNamespace
@@ -863,3 +864,31 @@ def test_node_agent_host_detail_combines_dynamic_with_cached_static(monkeypatch)
     assert result["kernel_version"] == "6.8.0"
     assert result["vendor"] == "Dell"
     assert result["error"] is None
+
+
+def test_named_interface_stats_quotes_hostile_interface_names(monkeypatch):
+    scripts: list[str] = []
+
+    def _capture(script: str, timeout: int = 10) -> subprocess.CompletedProcess[str]:
+        scripts.append(script)
+        return subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(node_agent_metrics_ops, "_run_host_shell", _capture)
+    node_agent_metrics_ops._interface_prev_samples.clear()
+
+    result = node_agent_metrics_ops._get_named_interface_stats(
+        ["eth0", "a;rm -rf /", "$(reboot)", "`id`"]
+    )
+
+    assert result["error"] is None
+    assert len(scripts) == 1
+    loop_header = next(line for line in scripts[0].splitlines() if line.startswith("for name in "))
+    # Every hostile name must appear only as a single-quoted shell literal;
+    # an unquoted metacharacter in the loop header means injection is back.
+    for hostile in ("a;rm -rf /", "$(reboot)", "`id`"):
+        assert shlex.quote(hostile) in loop_header
+    tokens = shlex.split(loop_header[len("for name in "):].rstrip(" ;do"))
+    assert tokens == ["eth0", "a;rm -rf /", "$(reboot)", "`id`"]
+    # The loop header must contain no bare shell metacharacters outside the
+    # quoted literals: reconstructing it from the tokens must round-trip.
+    assert loop_header == "for name in " + " ".join(shlex.quote(tok) for tok in tokens) + "; do"

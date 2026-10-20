@@ -129,23 +129,53 @@ def reboot(
     payload: RebootRequest,
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
-    node_agent_common._authorise(authorization)
-
     node_name = node_agent_common._node_name()
+
+    def _audit(event: str, detail: str = "") -> None:
+        node_agent_common.audit_reboot(node_agent_common.RebootAuditEvent(
+            event=event,
+            request_id=payload.request_id,
+            node=node_name,
+            requested_by=payload.requested_by or "unknown",
+            reason=payload.reason or "",
+            detail=detail,
+        ))
+
+    try:
+        node_agent_common._authorise(authorization)
+    except HTTPException:
+        _audit("rejected", "unauthorised")
+        raise
+
     if payload.expected_node and payload.expected_node != node_name:
+        _audit("rejected", f"expected_node mismatch: {payload.expected_node}")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"request targeted '{payload.expected_node}' but this agent serves '{node_name}'",
         )
 
+    if not node_agent_common.remember_request_id(payload.request_id):
+        _audit("rejected", "duplicate or replayed request_id")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="reboot request already processed",
+        )
+
     with node_agent_common._state_lock:
         if node_agent_common._reboot_in_progress:
+            _audit("rejected", "reboot already in progress")
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="reboot already in progress",
             )
         node_agent_common._reboot_in_progress = True
 
-    node_agent_common._LOGGER.info("reboot accepted node=%s request_id=%s", node_name, payload.request_id)
+    _audit("accepted", f"hypervisor={payload.hypervisor or 'unknown'}")
+    node_agent_common._LOGGER.info(
+        "reboot accepted node=%s request_id=%s requested_by=%s",
+        node_name,
+        payload.request_id,
+        payload.requested_by or "unknown",
+    )
     threading.Thread(target=node_agent_common._reboot_host, daemon=True).start()
     return {"accepted": True, "node": node_name, "request_id": payload.request_id}

@@ -22,6 +22,20 @@ def get_etcd_node_names(auth: K8sAuth | None = None) -> set[str]:
     return result
 
 
+def get_etcd_member_node_names(auth: K8sAuth | None = None) -> set[str]:
+    """Return node names that host etcd members.
+
+    The ``node-role.kubernetes.io/etcd`` label is the authoritative role
+    marker for this cluster.  Raises RuntimeError when the label set is empty
+    or unreadable so callers fail closed instead of treating an unknown
+    cluster as "no members".
+    """
+    labeled = get_etcd_node_names(auth=auth)
+    if not labeled:
+        raise RuntimeError("no labeled etcd nodes found; cannot confirm etcd membership")
+    return labeled
+
+
 def get_mariadb_node_names(auth: K8sAuth | None = None) -> set[str]:
     """Return node names currently hosting mariadb-cluster pods."""
     v1 = client.CoreV1Api(_api_client(auth))

@@ -12,6 +12,10 @@ AuditCb = Callable[[str, str], None]
 
 REBOOT_OFFLINE_TIMEOUT = 300
 REBOOT_ONLINE_TIMEOUT = 1200
+# Minimum time a reboot must be in flight before a Ready node with an unchanged
+# ready_since may be treated as recovered (covers agents that reboot before
+# kubelet can report NotReady).
+REBOOT_MIN_INFLIGHT = 120
 
 
 @dataclass
@@ -54,6 +58,8 @@ def run_reboot(
     time_module,
     audit_cb: Optional[AuditCb] = None,
     k8s_auth=None,
+    phase_already_claimed: bool = False,
+    operator: Optional[str] = None,
 ) -> None:
     ctx = WorkflowContext(
         state=state,
@@ -63,25 +69,33 @@ def run_reboot(
         abort_prefix="Reboot aborted",
     )
 
-    state.phase = NodePhase.REBOOTING
-    state.reboot_start = time_module.time()
-    state.reboot_downtime = None
-    state.etcd_healthy = False
-    state.init_reboot_steps()
+    if not phase_already_claimed:
+        state.phase = NodePhase.REBOOTING
+        state.reboot_start = time_module.time()
+        state.reboot_downtime = None
+        state.etcd_healthy = False
+        state.init_reboot_steps()
+    elif state.reboot_start is None:
+        state.reboot_start = time_module.time()
     update_cb()
 
     baseline_ready_since = None
+    baseline_valid = False
     try:
         for nd in k8s_ops.get_nodes(auth=k8s_auth):
             if nd["name"] == state.k8s_name:
                 baseline_ready_since = nd.get("ready_since")
+                baseline_valid = True
                 break
     except Exception:
         pass
+    if not baseline_valid:
+        ctx.abort("issue_reboot", "Cannot capture Ready baseline — refusing to reboot without a valid recovery baseline")
+        return
 
     ctx.step_set("issue_reboot", StepStatus.RUNNING)
     try:
-        issue_reboot_fn(state, ctx.log)
+        issue_reboot_fn(state, ctx.log, requested_by=operator)
     except Exception as exc:
         ctx.abort("issue_reboot", str(exc))
         return
@@ -117,21 +131,41 @@ def run_reboot(
         ctx.step_set("await_offline", StepStatus.SKIPPED, "Not detected — proceeding")
 
     ctx.step_set("await_online", StepStatus.RUNNING)
-    deadline = time_module.time() + REBOOT_ONLINE_TIMEOUT
+    online_deadline = state.reboot_start + REBOOT_ONLINE_TIMEOUT
     came_back = False
+    saw_ready_before_offline = not went_offline
 
-    while time_module.time() < deadline:
+    while time_module.time() < online_deadline:
         try:
-            for nd in k8s_ops.get_nodes(auth=k8s_auth):
-                if nd["name"] != state.k8s_name or not nd["ready"]:
-                    continue
-                ready_since = nd.get("ready_since")
-                if ready_since is not None and ready_since != baseline_ready_since:
+            nodes = k8s_ops.get_nodes(auth=k8s_auth)
+        except Exception:
+            nodes = []
+        for nd in nodes:
+            if nd["name"] != state.k8s_name:
+                continue
+            if nd["ready"]:
+                # Recovery requires a changed ready_since.  An unchanged
+                # ready_since counts only while the node is still inside the
+                # offline-detection blind window (never went NotReady, reboot
+                # in flight past the minimum, and no Ready was seen inside the
+                # window) — this covers agents that reboot the host before
+                # kubelet can report NotReady, without ever accepting a
+                # never-went-down node as recovered.
+                changed = (
+                    nd.get("ready_since") is not None
+                    and nd.get("ready_since") != baseline_ready_since
+                )
+                in_window = (
+                    not went_offline
+                    and not saw_ready_before_offline
+                    and (time_module.time() - state.reboot_start) >= REBOOT_MIN_INFLIGHT
+                )
+                saw_ready_before_offline = True
+                if changed or in_window:
                     state.reboot_downtime = time_module.time() - state.reboot_start
                     came_back = True
-                    break
-        except Exception:
-            pass
+                break
+            saw_ready_before_offline = False
 
         if came_back:
             break
@@ -144,7 +178,7 @@ def run_reboot(
         time_module.sleep(5)
 
     if not came_back:
-        ctx.abort("await_online", "Timeout — node did not return online")
+        ctx.abort("await_online", "Timeout — no offline-to-online transition observed, cannot confirm the reboot completed")
         return
 
     dt = int(state.reboot_downtime)
