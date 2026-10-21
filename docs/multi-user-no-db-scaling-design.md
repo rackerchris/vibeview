@@ -28,9 +28,13 @@
 
 **Not implemented (open decisions):**
 
-- Session strategy (Layer/§1): sessions remain in-process; multi-replica still
-  requires sticky sessions or a Redis session store (Phase 2 decision pending).
-  `replicaCount` must stay 1 until that decision.
+- ~~Session strategy~~ **Decided: sticky sessions.** The web Service ships
+  `sessionAffinity: ClientIP` (3600s timeout) in the chart, so `replicaCount`
+  can be raised above 1 with browser sessions pinned per client IP. Sessions
+  remain pod-local and die with pod loss; a shared session store (Redis) stays
+  a future option if failover behavior becomes a requirement.
+- Phase 3 validation (2+ replicas, cross-pod lease contention) is deferred;
+  it will be exercised locally on a colima/kind cluster.
 - Reads/caches remain replica-local by design (§7, intended).
 
 Phase 1 of the rollout plan (lease-aware actions on one replica) is done.

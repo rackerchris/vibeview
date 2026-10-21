@@ -6,6 +6,16 @@ metadata:
     {{- include "draino.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
+  {{- if .Values.service.sessionAffinity }}
+  # Sessions are pod-local (Phase 2 of the multi-user design is deferred):
+  # ClientIP affinity keeps a browser on the pod that owns its session.
+  sessionAffinity: {{ .Values.service.sessionAffinity }}
+  {{- with .Values.service.sessionAffinityConfig.clientIP.timeoutSeconds }}
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: {{ . }}
+  {{- end }}
+  {{- end }}
   selector:
     {{- include "draino.selectorLabels" . | nindent 4 }}
   ports:

@@ -1,4 +1,8 @@
-replicaCount: 1
+replicaCount: 1  # >1 requires the sticky routing below (sessions are pod-local)
+
+# Operation-lock lease TTL in seconds (cluster-wide action exclusivity).
+# A dead web pod's locks self-release after this long.
+drainoLeaseSeconds: 60
 
 image:
   repository: ghcr.io/busterswt/vibeview
@@ -25,6 +29,12 @@ service:
   type: ClusterIP
   port: 80
   targetPort: 8000
+  # Sessions are pod-local until the shared-session-store decision; sticky
+  # routing lets you run >1 replica without breaking logins.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
 
 nodeAgent:
   profile: unprivileged

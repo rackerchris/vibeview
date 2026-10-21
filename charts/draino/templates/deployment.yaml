@@ -62,6 +62,8 @@ spec:
           env:
             - name: DRAINO_TRUST_PROXY_HEADERS
               value: "true"
+            - name: DRAINO_LEASE_SECONDS
+              value: {{ .Values.drainoLeaseSeconds | quote }}
             - name: DRAINO_NODE_AGENT_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             - name: DRAINO_NODE_AGENT_SERVICE_NAME
